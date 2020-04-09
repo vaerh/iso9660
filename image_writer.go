@@ -193,7 +193,7 @@ type writeContext struct {
 	wa                io.WriterAt
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
-	itemsToWrite      *list.List
+	itemsToWrite      *list.List // simple fifo
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
