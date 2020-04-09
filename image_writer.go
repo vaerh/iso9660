@@ -75,7 +75,7 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return os.ErrExist
 	}
 
-	pos[fileName] = fileHandler(data)
+	pos[fileName] = newBuffer(data)
 	return nil
 }
 

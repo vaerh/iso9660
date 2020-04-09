@@ -12,7 +12,7 @@ type genericBuffer interface {
 }
 
 // fileHandler returns a generic interface for various kind of files or buffers
-func fileHandler(in io.Reader) genericBuffer {
+func newBuffer(in io.Reader) genericBuffer {
 	switch v := in.(type) {
 	case genericBuffer:
 		return v
