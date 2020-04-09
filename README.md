@@ -1,7 +1,7 @@
 ## iso9660
-[![GoDoc](https://godoc.org/github.com/kdomanski/iso9660?status.svg)](https://godoc.org/github.com/kdomanski/iso9660)
+[![GoDoc](https://godoc.org/github.com/KarpelesLab/iso9660?status.svg)](https://godoc.org/github.com/KarpelesLab/iso9660)
 
-A package for reading and creating ISO9660
+A package for reading and creating ISO9660, forked from https://github.com/kdomanski/iso9660.
 
 Joliet and Rock Ridge extensions are not supported.
 
@@ -15,7 +15,7 @@ package main
 import (
   "log"
 
-  "github.com/kdomanski/iso9660/isoutil"
+  "github.com/KarpelesLab/iso9660/isoutil"
 )
 
 func main() {
@@ -40,7 +40,7 @@ import (
   "log"
   "os"
 
-  "github.com/kdomanski/iso9660"
+  "github.com/KarpelesLab/iso9660"
 )
 
 func main() {
