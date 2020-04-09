@@ -1,4 +1,4 @@
-package util
+package isoutil
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/kdomanski/iso9660"
+	"github.com/KarpelesLab/iso9660"
 )
 
 func ExtractImageToDirectory(image io.ReaderAt, destination string) error {

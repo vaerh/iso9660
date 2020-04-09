@@ -15,7 +15,7 @@ package main
 import (
   "log"
 
-  "github.com/kdomanski/iso9660/util"
+  "github.com/kdomanski/iso9660/isoutil"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
   }
   defer f.Close()
 
-  if err = util.ExtractImageToDirectory(f, "/home/user/target_dir"); err != nil {
+  if err = isoutil.ExtractImageToDirectory(f, "/home/user/target_dir"); err != nil {
     log.Fatalf("failed to extract image: %s", err)
   }
 }

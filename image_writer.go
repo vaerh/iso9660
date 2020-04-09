@@ -470,7 +470,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 			VolumeSetIdentifier:           "",
 			PublisherIdentifier:           "",
 			DataPreparerIdentifier:        "",
-			ApplicationIdentifier:         "github.com/kdomanski/iso9660",
+			ApplicationIdentifier:         "github.com/KarpelesLab/iso9660",
 			CopyrightFileIdentifier:       "",
 			AbstractFileIdentifier:        "",
 			BibliographicFileIdentifier:   "",

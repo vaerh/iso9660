@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/kdomanski/iso9660/util"
+	"github.com/KarpelesLab/iso9660/isoutil"
 )
 
 func main() {
@@ -18,7 +18,7 @@ func main() {
 	}
 	defer f.Close()
 
-	if err = util.ExtractImageToDirectory(f, os.Args[2]); err != nil {
+	if err = isoutil.ExtractImageToDirectory(f, os.Args[2]); err != nil {
 		log.Fatalf("failed to extract image: %s", err)
 	}
 }
