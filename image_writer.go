@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,61 +25,62 @@ var (
 	// than 4GB, which due to the 32-bit address limitation is not possible
 	// except with ISO 9660-Level 3
 	ErrFileTooLarge = errors.New("file is exceeding the maximum file size of 4GB")
+	ErrIsDir        = errors.New("is a directory")
 )
 
 // ImageWriter is responsible for staging an image's contents
 // and writing them to an image.
 type ImageWriter struct {
-	stagingDir string
+	root map[string]interface{}
 }
 
 // NewWriter creates a new ImageWrite and initializes its temporary staging dir.
 // Cleanup should be called after the ImageWriter is no longer needed.
 func NewWriter() (*ImageWriter, error) {
-	tmp, err := ioutil.TempDir("", "")
-	if err != nil {
-		return nil, err
-	}
-
-	return &ImageWriter{stagingDir: tmp}, nil
+	return &ImageWriter{
+		root: make(map[string]interface{}),
+	}, nil
 }
 
 // Cleanup deletes the underlying temporary staging directory of an ImageWriter.
 // It can be called multiple times without issues.
 func (iw *ImageWriter) Cleanup() error {
-	if iw.stagingDir == "" {
-		return nil
-	}
-
-	if err := os.RemoveAll(iw.stagingDir); err != nil {
-		return err
-	}
-
-	iw.stagingDir = ""
 	return nil
 }
 
-// AddFile adds a file to the ImageWriter's staging area.
+// AddFile adds a file to the ImageWriter.
 // All path components are mangled to match basic ISO9660 filename requirements.
 func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 	directoryPath, fileName := manglePath(filePath)
 
-	if err := os.MkdirAll(path.Join(iw.stagingDir, directoryPath), 0755); err != nil {
-		return err
+	dp := strings.Split(directoryPath, "/")
+	pos := iw.root
+	for _, seg := range dp {
+		if v, ok := pos[seg]; ok {
+			if rV, ok := v.(map[string]interface{}); ok {
+				pos = rV
+				continue
+			}
+			// trying to create a directory on top of a file → problem
+			return ErrIsDir
+		}
+		// not found → add
+		n := make(map[string]interface{})
+		pos[seg] = n
+		pos = n
 	}
 
-	f, err := os.OpenFile(path.Join(iw.stagingDir, directoryPath, fileName), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
+	if _, ok := pos[fileName]; ok {
+		// duplicate
+		return os.ErrExist
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, data)
-	return err
+	pos[fileName] = fileHandler(data)
+	return nil
 }
 
 func manglePath(input string) (string, string) {
-	nonEmptySegments := splitPath(input)
+	nonEmptySegments := splitPath(path.Clean(input))
 
 	dirSegments := nonEmptySegments[:len(nonEmptySegments)-1]
 	name := nonEmptySegments[len(nonEmptySegments)-1]
@@ -155,17 +156,12 @@ func mangleDString(input string, maxCharacters int) string {
 	return mangledString
 }
 
-func calculateDirChildrenSectors(path string) (uint32, error) {
-	contents, err := ioutil.ReadDir(path)
-	if err != nil {
-		return 0, err
-	}
-
+func calculateDirChildrenSectors(dir map[string]interface{}) (uint32, error) {
 	var sectors uint32
 	var currentSectorOccupied uint32 = 68 // the 0x00 and 0x01 entries
 
-	for _, c := range contents {
-		identifierLen := len(c.Name())
+	for name := range dir {
+		identifierLen := len(name)
 		idPaddingLen := (identifierLen + 1) % 2
 		entryLength := uint32(33 + identifierLen + idPaddingLen)
 
@@ -193,7 +189,7 @@ func fileLengthToSectors(l uint32) uint32 {
 }
 
 type writeContext struct {
-	stagingDir        string
+	root              map[string]interface{}
 	wa                io.WriterAt
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
@@ -201,7 +197,7 @@ type writeContext struct {
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
-	extentLengthInSectors, err := calculateDirChildrenSectors(wc.stagingDir)
+	extentLengthInSectors, err := calculateDirChildrenSectors(wc.root)
 	if err != nil {
 		return nil, err
 	}
@@ -223,19 +219,14 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 }
 
 type itemToWrite struct {
-	isDirectory  bool
+	value        interface{} // can be map[string]interface{} or genericBuffer
 	dirPath      string
 	ownEntry     *DirectoryEntry
 	parentEntery *DirectoryEntry
 	targetSector uint32
 }
 
-func (wc *writeContext) processDirectory(dirPath string, ownEntry *DirectoryEntry, parentEntery *DirectoryEntry, targetSector uint32) error {
-	contents, err := ioutil.ReadDir(dirPath)
-	if err != nil {
-		return err
-	}
-
+func (wc *writeContext) processDirectory(dirPath string, dir map[string]interface{}, ownEntry *DirectoryEntry, parentEntery *DirectoryEntry, targetSector uint32) error {
 	var writeOffset uint32
 
 	currentDE := ownEntry.Clone()
@@ -263,27 +254,39 @@ func (wc *writeContext) processDirectory(dirPath string, ownEntry *DirectoryEntr
 	}
 	writeOffset += uint32(n)
 
-	for _, c := range contents {
+	// here we need to proceed in alphabetical order so tests aren't broken
+	names := make([]string, 0, len(dir))
+	for name := range dir {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+
+	for _, name := range names {
+		c := dir[name]
+
 		var (
 			fileFlags             byte
 			extentLengthInSectors uint32
 			extentLength          uint32
 		)
-		if c.IsDir() {
-			extentLengthInSectors, err = calculateDirChildrenSectors(path.Join(dirPath, c.Name()))
+
+		if cV, ok := c.(map[string]interface{}); ok {
+			extentLengthInSectors, err = calculateDirChildrenSectors(cV)
 			if err != nil {
 				return err
 			}
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
-		} else {
-			if c.Size() > int64(math.MaxUint32) {
+		} else if cV, ok := c.(genericBuffer); ok {
+			if cV.Size() > int64(math.MaxUint32) {
 				return ErrFileTooLarge
 			}
-			extentLength = uint32(c.Size())
+			extentLength = uint32(cV.Size())
 			extentLengthInSectors = fileLengthToSectors(extentLength)
 
 			fileFlags = 0
+		} else {
+			panic("this should not happen")
 		}
 
 		extentLocation := atomic.AddUint32(&wc.freeSectorPointer, extentLengthInSectors) - extentLengthInSectors
@@ -296,14 +299,14 @@ func (wc *writeContext) processDirectory(dirPath string, ownEntry *DirectoryEntr
 			FileUnitSize:                 0, // 0 for non-interleaved write
 			InterleaveGap:                0, // not interleaved
 			VolumeSequenceNumber:         1, // we only have one volume
-			Identifier:                   c.Name(),
+			Identifier:                   name,
 			SystemUse:                    []byte{},
 		}
 
 		// queue this child for processing
 		wc.itemsToWrite.PushBack(itemToWrite{
-			isDirectory:  c.IsDir(),
-			dirPath:      path.Join(dirPath, c.Name()),
+			value:        c,
+			dirPath:      path.Join(dirPath, name),
 			ownEntry:     de,
 			parentEntery: ownEntry,
 			targetSector: uint32(de.ExtentLocation),
@@ -348,25 +351,14 @@ func (wc *writeContext) processDirectory(dirPath string, ownEntry *DirectoryEntr
 	return nil
 }
 
-func (wc *writeContext) processFile(dirPath string, targetSector uint32) error {
-	f, err := os.Open(dirPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fileinfo, err := f.Stat()
-	if err != nil {
-		return err
-	}
-
-	if fileinfo.Size() > int64(math.MaxUint32) {
+func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSector uint32) error {
+	if buf.Size() > int64(math.MaxUint32) {
 		return ErrFileTooLarge
 	}
 
 	buffer := make([]byte, sectorSize)
 
-	for bytesLeft := uint32(fileinfo.Size()); bytesLeft > 0; {
+	for bytesLeft := uint32(buf.Size()); bytesLeft > 0; {
 		var toRead uint32
 		if bytesLeft < sectorSize {
 			toRead = bytesLeft
@@ -374,11 +366,11 @@ func (wc *writeContext) processFile(dirPath string, targetSector uint32) error {
 			toRead = sectorSize
 		}
 
-		if _, err = io.ReadAtLeast(f, buffer, int(toRead)); err != nil {
+		if _, err := io.ReadAtLeast(buf, buffer, int(toRead)); err != nil {
 			return err
 		}
 
-		if _, err = wc.wa.WriteAt(buffer, int64(targetSector*sectorSize)); err != nil {
+		if _, err := wc.wa.WriteAt(buffer, int64(targetSector*sectorSize)); err != nil {
 			return err
 		}
 
@@ -393,15 +385,16 @@ func (wc *writeContext) writeAll() error {
 	for item := wc.itemsToWrite.Front(); wc.itemsToWrite.Len() > 0; item = wc.itemsToWrite.Front() {
 		it := item.Value.(itemToWrite)
 		var err error
-		if it.isDirectory {
-			err = wc.processDirectory(it.dirPath, it.ownEntry, it.parentEntery, it.targetSector)
+		if cV, ok := it.value.(map[string]interface{}); ok {
+			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntery, it.targetSector)
+		} else if cV, ok := it.value.(genericBuffer); ok {
+			err = wc.processFile(it.dirPath, cV, it.targetSector)
 		} else {
-			err = wc.processFile(it.dirPath, it.targetSector)
+			panic("shouldn't happen")
 		}
 
 		if err != nil {
-			relativePath := it.dirPath[len(wc.stagingDir):]
-			return fmt.Errorf("processing %s: %s", relativePath, err)
+			return fmt.Errorf("processing %s: %s", it.dirPath, err)
 		}
 
 		wc.itemsToWrite.Remove(item)
@@ -424,7 +417,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	now := time.Now()
 
 	wc := writeContext{
-		stagingDir:        iw.stagingDir,
+		root:              iw.root,
 		wa:                wa,
 		timestamp:         RecordingTimestamp{},
 		freeSectorPointer: 18, // system area (16) + 2 volume descriptors
@@ -437,8 +430,8 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	}
 
 	wc.itemsToWrite.PushBack(itemToWrite{
-		isDirectory:  true,
-		dirPath:      wc.stagingDir,
+		value:        wc.root,
+		dirPath:      "",
 		ownEntry:     rootDE,
 		parentEntery: rootDE,
 		targetSector: uint32(rootDE.ExtentLocation),
