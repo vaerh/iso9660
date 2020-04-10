@@ -296,7 +296,7 @@ func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
 
 type writeContext struct {
 	iw                *ImageWriter
-	wa                io.Writer
+	w                 io.Writer
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
 	itemsToWrite      *list.List     // simple fifo used during
@@ -515,7 +515,7 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 		// invalid location
 		return errors.New("invalid write: sector position is not valid")
 	}
-	_, err := wc.wa.Write(buffer)
+	_, err := wc.w.Write(buffer)
 	if err != nil {
 		return err
 	}
@@ -525,7 +525,7 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 		secCnt += 1
 		// add zeroes using wc.emptySector (which is a sector-sized buffer of zeroes)
 		extra := sectorSize - secBytes
-		wc.wa.Write(wc.emptySector[:extra])
+		wc.w.Write(wc.emptySector[:extra])
 	}
 
 	wc.writeSecPos += secCnt
@@ -540,7 +540,7 @@ func (wc *writeContext) writeDescriptor(pvd *volumeDescriptor, sector uint32) er
 	}
 }
 
-func (iw *ImageWriter) WriteTo(wa io.Writer) error {
+func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	var err error
 
 	// generate vd list with terminator
@@ -554,7 +554,7 @@ func (iw *ImageWriter) WriteTo(wa io.Writer) error {
 
 	wc := writeContext{
 		iw:                iw,
-		wa:                wa,
+		w:                 w,
 		timestamp:         RecordingTimestamp{},
 		freeSectorPointer: uint32(16 + len(vd)), // system area (16) + descriptors
 		itemsToWrite:      list.New(),
