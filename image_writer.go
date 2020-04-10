@@ -241,7 +241,7 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 
 	currentDE := ownEntry.Clone()
 	currentDE.Identifier = string([]byte{0})
-	parentDE := ownEntry.Clone()
+	parentDE := parentEntry.Clone()
 	parentDE.Identifier = string([]byte{1})
 
 	currentDEData, err := currentDE.MarshalBinary()
