@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"path"
@@ -272,12 +271,13 @@ func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
 }
 
 type writeContext struct {
-	root              map[string]interface{}
-	wa                io.WriterAt
+	iw                *ImageWriter
+	wa                io.Writer
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
 	itemsToWrite      *list.List     // simple fifo used during
 	items             []*itemToWrite // items in the right order for final write
+	writeSecPos       uint32
 }
 
 // allocSectors will allocate a number of sectors and return the first free position
@@ -289,7 +289,7 @@ func (wc *writeContext) allocSectors(count uint32) uint32 {
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
-	extentLengthInSectors := calculateDirChildrenSectors(wc.root)
+	extentLengthInSectors := calculateDirChildrenSectors(wc.iw.root)
 
 	extentLocation := wc.allocSectors(extentLengthInSectors)
 	de := &DirectoryEntry{
@@ -403,12 +403,6 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 		if uint32(buf.Len()+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			if uint32(buf.Len()) < sectorSize {
-				// fill to sector size
-				t := make([]byte, sectorSize-uint32(buf.Len())) // TODO better method?
-				buf.Write(t)
-			}
-
 			err = wc.writeSector(buf.Bytes(), targetSector)
 			if err != nil {
 				return err
@@ -424,12 +418,6 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 	// unless we reached the exact end of the sector
 	if buf.Len() > 0 {
-		if uint32(buf.Len()) < sectorSize {
-			// fill to sector size
-			t := make([]byte, sectorSize-uint32(buf.Len())) // TODO better method?
-			buf.Write(t)
-		}
-
 		err = wc.writeSector(buf.Bytes(), targetSector)
 		if err != nil {
 			return err
@@ -493,22 +481,43 @@ func (wc *writeContext) writeAll() error {
 	return nil
 }
 
+// writeSector writes one or more sector(s) to the stream, checking the passed
+// position is correct. If buffer is not rounded to a sector position, extra
+// zeroes will be written to disk.
 func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
-	log.Printf("Writing sector %d (%d bytes)", sector, len(buffer))
-	_, err := wc.wa.WriteAt(buffer, int64(sectorSize*sector))
-	return err
+	// ensure our position in the stream is correct
+	if sector != wc.writeSecPos {
+		// invalid location
+		return errors.New("invalid write: sector position is not valid")
+	}
+	_, err := wc.wa.Write(buffer)
+	if err != nil {
+		return err
+	}
+
+	secCnt := uint32(len(buffer)) / sectorSize
+	if secBytes := uint32(len(buffer)) % sectorSize; secBytes != 0 {
+		secCnt += 1
+		// add zeroes
+		extra := sectorSize - secBytes
+		wc.wa.Write(make([]byte, extra)) // TODO
+	}
+
+	wc.writeSecPos += secCnt
+	return nil
 }
 
-func (iw *ImageWriter) WriteTo(wa io.WriterAt) error {
+func (iw *ImageWriter) WriteTo(wa io.Writer) error {
 	buffer := make([]byte, sectorSize)
 	var err error
 
 	wc := writeContext{
-		root:              iw.root,
+		iw:                iw,
 		wa:                wa,
 		timestamp:         RecordingTimestamp{},
 		freeSectorPointer: 18, // system area (16) + 2 volume descriptors
 		itemsToWrite:      list.New(),
+		writeSecPos:       0,
 	}
 
 	// write 16 sectors of zeroes
@@ -524,7 +533,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt) error {
 		return fmt.Errorf("creating root directory descriptor: %s", err)
 	}
 
-	iw.Primary.VolumeSpaceSize = int32(recursiveDirSectorCount(wc.root) + 18) // 18 sectors reserved at beginning of disk
+	iw.Primary.VolumeSpaceSize = int32(recursiveDirSectorCount(iw.root) + 18) // 18 sectors reserved at beginning of disk
 	iw.Primary.RootDirectoryEntry = rootDE
 
 	pvd := volumeDescriptor{
@@ -558,7 +567,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt) error {
 
 	// Write disk data
 	wc.itemsToWrite.PushBack(itemToWrite{
-		value:        wc.root,
+		value:        iw.root,
 		dirPath:      "",
 		ownEntry:     rootDE,
 		parentEntry:  rootDE,
