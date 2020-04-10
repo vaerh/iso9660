@@ -91,18 +91,6 @@ func (iw *ImageWriter) Cleanup() error {
 	return nil
 }
 
-// AddBoot will add a boot volume descriptor to the image
-func (iw *ImageWriter) AddBoot(boot *BootVolumeDescriptorBody) {
-	iw.vd = append(iw.vd, &volumeDescriptor{
-		Header: volumeDescriptorHeader{
-			Type:       volumeTypeBoot,
-			Identifier: standardIdentifierBytes,
-			Version:    1,
-		},
-		Boot: boot,
-	})
-}
-
 func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath string, data DataSource) error {
 	directoryPath, fileName := manglePath(filePath)
 
@@ -400,6 +388,24 @@ func (wc *writeContext) processFile(dirPath string, buf DataSource, targetSector
 }
 
 func (wc *writeContext) processAll() error {
+	// Generate disk header
+	rootDE, err := wc.createDEForRoot()
+	if err != nil {
+		return fmt.Errorf("creating root directory descriptor: %s", err)
+	}
+
+	// store rootDE pointer in primary
+	wc.iw.Primary.RootDirectoryEntry = rootDE
+
+	// Write disk data
+	wc.itemsToWrite.PushBack(&itemToWrite{
+		value:        wc.iw.root,
+		dirPath:      "",
+		ownEntry:     rootDE,
+		parentEntry:  rootDE,
+		targetSector: uint32(rootDE.ExtentLocation),
+	})
+
 	for item := wc.itemsToWrite.Front(); wc.itemsToWrite.Len() > 0; item = wc.itemsToWrite.Front() {
 		it := item.Value.(*itemToWrite)
 		var err error
@@ -475,9 +481,34 @@ func (wc *writeContext) writeDescriptor(pvd *volumeDescriptor, sector uint32) er
 }
 
 func (iw *ImageWriter) WriteTo(w io.Writer) error {
-	var err error
-
 	vd := iw.vd
+	var (
+		err error
+		// variables used for boot
+		boot    *BootVolumeDescriptorBody
+		bootCat []byte
+	)
+
+	if len(iw.boot) > 0 {
+		// we need a boot catalog, store info
+		boot = &BootVolumeDescriptorBody{}
+		bootCat = make([]byte, 2048)
+
+		// add boot catalog
+		err = iw.AddFile(NewBufferSource(bytes.NewReader(bootCat)), iw.Catalog)
+		if err != nil {
+			return err
+		}
+
+		vd = append(vd, &volumeDescriptor{
+			Header: volumeDescriptorHeader{
+				Type:       volumeTypeBoot,
+				Identifier: standardIdentifierBytes,
+				Version:    1,
+			},
+			Boot: boot,
+		})
+	}
 
 	// generate vd list with terminator
 	vd = append(vd, &volumeDescriptor{
@@ -499,16 +530,17 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		lookupTable:       make(map[string]*itemToWrite),
 	}
 
-	// Generate disk header
-	rootDE, err := wc.createDEForRoot()
-	if err != nil {
-		return fmt.Errorf("creating root directory descriptor: %s", err)
-	}
-
 	// configure volume space size
 	iw.Primary.VolumeSpaceSize = int32(16 + uint32(len(vd)) + recursiveDirSectorCount(iw.root))
-	// store rootDE pointer in primary
-	iw.Primary.RootDirectoryEntry = rootDE
+
+	// processAll() will prepare the data to be written
+	if err = wc.processAll(); err != nil {
+		return fmt.Errorf("writing files: %s", err)
+	}
+
+	if len(iw.boot) > 0 {
+		// we have a boot catalog to make!
+	}
 
 	// write 16 sectors of zeroes
 	for i := uint32(0); i < 16; i++ {
@@ -523,20 +555,6 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 			return err
 		}
 		sector += 1
-	}
-
-	// Write disk data
-	wc.itemsToWrite.PushBack(&itemToWrite{
-		value:        iw.root,
-		dirPath:      "",
-		ownEntry:     rootDE,
-		parentEntry:  rootDE,
-		targetSector: uint32(rootDE.ExtentLocation),
-	})
-
-	// processAll() will actually prepare the data to be written
-	if err = wc.processAll(); err != nil {
-		return fmt.Errorf("writing files: %s", err)
 	}
 
 	// this actually writes the data to the disk
