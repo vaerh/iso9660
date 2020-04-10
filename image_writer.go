@@ -33,41 +33,52 @@ var (
 type ImageWriter struct {
 	root    map[string]interface{}
 	Primary *PrimaryVolumeDescriptorBody
-	Boot    *BootVolumeDescriptorBody
+	vd      []*volumeDescriptor
 }
 
 // NewWriter creates a new ImageWrite.
 func NewWriter() (*ImageWriter, error) {
 	now := time.Now()
+	Primary := &PrimaryVolumeDescriptorBody{
+		SystemIdentifier:              runtime.GOOS,
+		VolumeIdentifier:              "UNNAMED",
+		VolumeSpaceSize:               0, // this will be calculated upon finalization of disk
+		VolumeSetSize:                 1,
+		VolumeSequenceNumber:          1,
+		LogicalBlockSize:              int16(sectorSize),
+		PathTableSize:                 0,
+		TypeLPathTableLoc:             0,
+		OptTypeLPathTableLoc:          0,
+		TypeMPathTableLoc:             0,
+		OptTypeMPathTableLoc:          0,
+		RootDirectoryEntry:            nil, // this will be calculated upon finalization of disk
+		VolumeSetIdentifier:           "",
+		PublisherIdentifier:           "",
+		DataPreparerIdentifier:        "",
+		ApplicationIdentifier:         "github.com/KarpelesLab/iso9660",
+		CopyrightFileIdentifier:       "",
+		AbstractFileIdentifier:        "",
+		BibliographicFileIdentifier:   "",
+		VolumeCreationDateAndTime:     VolumeDescriptorTimestampFromTime(now),
+		VolumeModificationDateAndTime: VolumeDescriptorTimestampFromTime(now),
+		VolumeExpirationDateAndTime:   VolumeDescriptorTimestamp{},
+		VolumeEffectiveDateAndTime:    VolumeDescriptorTimestampFromTime(now),
+		FileStructureVersion:          1,
+		ApplicationUsed:               [512]byte{},
+	}
 
 	return &ImageWriter{
-		root: make(map[string]interface{}),
-		Primary: &PrimaryVolumeDescriptorBody{
-			SystemIdentifier:              runtime.GOOS,
-			VolumeIdentifier:              "UNNAMED",
-			VolumeSpaceSize:               0, // this will be calculated upon finalization of disk
-			VolumeSetSize:                 1,
-			VolumeSequenceNumber:          1,
-			LogicalBlockSize:              int16(sectorSize),
-			PathTableSize:                 0,
-			TypeLPathTableLoc:             0,
-			OptTypeLPathTableLoc:          0,
-			TypeMPathTableLoc:             0,
-			OptTypeMPathTableLoc:          0,
-			RootDirectoryEntry:            nil, // this will be calculated upon finalization of disk
-			VolumeSetIdentifier:           "",
-			PublisherIdentifier:           "",
-			DataPreparerIdentifier:        "",
-			ApplicationIdentifier:         "github.com/KarpelesLab/iso9660",
-			CopyrightFileIdentifier:       "",
-			AbstractFileIdentifier:        "",
-			BibliographicFileIdentifier:   "",
-			VolumeCreationDateAndTime:     VolumeDescriptorTimestampFromTime(now),
-			VolumeModificationDateAndTime: VolumeDescriptorTimestampFromTime(now),
-			VolumeExpirationDateAndTime:   VolumeDescriptorTimestamp{},
-			VolumeEffectiveDateAndTime:    VolumeDescriptorTimestampFromTime(now),
-			FileStructureVersion:          1,
-			ApplicationUsed:               [512]byte{},
+		root:    make(map[string]interface{}),
+		Primary: Primary,
+		vd: []*volumeDescriptor{
+			&volumeDescriptor{
+				Header: volumeDescriptorHeader{
+					Type:       volumeTypePrimary,
+					Identifier: standardIdentifierBytes,
+					Version:    1,
+				},
+				Primary: Primary,
+			},
 		},
 	}, nil
 }
@@ -75,6 +86,18 @@ func NewWriter() (*ImageWriter, error) {
 // Cleanup exists for compatibility. It is not used anymore.
 func (iw *ImageWriter) Cleanup() error {
 	return nil
+}
+
+// AddBoot will add a boot volume descriptor to the image
+func (iw *ImageWriter) AddBoot(boot *BootVolumeDescriptorBody) {
+	iw.vd = append(iw.vd, &volumeDescriptor{
+		Header: volumeDescriptorHeader{
+			Type:       volumeTypeBoot,
+			Identifier: standardIdentifierBytes,
+			Version:    1,
+		},
+		Boot: boot,
+	})
 }
 
 func (iw *ImageWriter) getDir(directoryPath string) (map[string]interface{}, error) {
@@ -509,77 +532,60 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 	return nil
 }
 
+func (wc *writeContext) writeDescriptor(pvd *volumeDescriptor, sector uint32) error {
+	if buffer, err := pvd.MarshalBinary(); err != nil {
+		return err
+	} else {
+		return wc.writeSector(buffer, sector)
+	}
+}
+
 func (iw *ImageWriter) WriteTo(wa io.Writer) error {
 	var err error
+
+	// generate vd list with terminator
+	vd := append(iw.vd, &volumeDescriptor{
+		Header: volumeDescriptorHeader{
+			Type:       volumeTypeTerminator,
+			Identifier: standardIdentifierBytes,
+			Version:    1,
+		},
+	})
 
 	wc := writeContext{
 		iw:                iw,
 		wa:                wa,
 		timestamp:         RecordingTimestamp{},
-		freeSectorPointer: 18, // system area (16) + 2 volume descriptors
+		freeSectorPointer: uint32(16 + len(vd)), // system area (16) + descriptors
 		itemsToWrite:      list.New(),
 		writeSecPos:       0,
 		emptySector:       make([]byte, sectorSize),
 	}
 
-	// Write disk header
+	// Generate disk header
 	rootDE, err := wc.createDEForRoot()
 	if err != nil {
 		return fmt.Errorf("creating root directory descriptor: %s", err)
 	}
 
-	iw.Primary.VolumeSpaceSize = int32(recursiveDirSectorCount(iw.root) + 18) // 18 sectors reserved at beginning of disk
+	// configure volume space size
+	iw.Primary.VolumeSpaceSize = int32(16 + uint32(len(vd)) + recursiveDirSectorCount(iw.root))
+	// store rootDE pointer in primary
 	iw.Primary.RootDirectoryEntry = rootDE
 
-	// write initial 18 sectors of zeroes
-	for i := uint32(0); i < 18; i++ {
-		buffer := wc.emptySector
-
-		switch i {
-		case 11:
-			if iw.Boot == nil {
-				break
-			}
-
-			pvd := volumeDescriptor{
-				Header: volumeDescriptorHeader{
-					Type:       volumeTypeBoot,
-					Identifier: standardIdentifierBytes,
-					Version:    1,
-				},
-				Boot: iw.Boot,
-			}
-			if buffer, err = pvd.MarshalBinary(); err != nil {
-				return err
-			}
-		case 16:
-			pvd := volumeDescriptor{
-				Header: volumeDescriptorHeader{
-					Type:       volumeTypePrimary,
-					Identifier: standardIdentifierBytes,
-					Version:    1,
-				},
-				Primary: iw.Primary,
-			}
-			if buffer, err = pvd.MarshalBinary(); err != nil {
-				return err
-			}
-		case 17:
-			terminator := volumeDescriptor{
-				Header: volumeDescriptorHeader{
-					Type:       volumeTypeTerminator,
-					Identifier: standardIdentifierBytes,
-					Version:    1,
-				},
-			}
-			if buffer, err = terminator.MarshalBinary(); err != nil {
-				return err
-			}
-		}
-
-		if err = wc.writeSector(buffer, i); err != nil {
+	// write 16 sectors of zeroes
+	for i := uint32(0); i < 16; i++ {
+		if err = wc.writeSector(wc.emptySector, i); err != nil {
 			return err
 		}
+	}
+
+	sector := uint32(16)
+	for _, pvd := range vd {
+		if err = wc.writeDescriptor(pvd, sector); err != nil {
+			return err
+		}
+		sector += 1
 	}
 
 	// Write disk data
