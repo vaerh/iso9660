@@ -189,7 +189,8 @@ func mangleDString(input string, maxCharacters int) string {
 	return mangledString
 }
 
-func calculateDirChildrenSectors(dir map[string]interface{}) (uint32, error) {
+// calculateDirChildrenSectors returns size of a given dir entry
+func calculateDirChildrenSectors(dir map[string]interface{}) uint32 {
 	var sectors uint32
 	var currentSectorOccupied uint32 = 68 // the 0x00 and 0x01 entries
 
@@ -210,15 +211,34 @@ func calculateDirChildrenSectors(dir map[string]interface{}) (uint32, error) {
 		sectors += 1
 	}
 
-	return sectors, nil
+	return sectors
 }
 
+// fileLengthToSectors returns size of a file in sectors
 func fileLengthToSectors(l uint32) uint32 {
 	if (l % sectorSize) == 0 {
 		return l / sectorSize
 	}
 
 	return (l / sectorSize) + 1
+}
+
+func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
+	// count sectors required for everything in a given dir (typically root)
+	sec := calculateDirChildrenSectors(dir) // own data space
+
+	for _, sub := range dir {
+		switch v := sub.(type) {
+		case map[string]interface{}:
+			sec += recursiveDirSectorCount(v)
+		case genericBuffer:
+			sec += fileLengthToSectors(uint32(v.Size()))
+		default:
+			panic("this should not happen")
+		}
+	}
+
+	return sec
 }
 
 type writeContext struct {
@@ -239,10 +259,7 @@ func (wc *writeContext) allocSectors(count uint32) uint32 {
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
-	extentLengthInSectors, err := calculateDirChildrenSectors(wc.root)
-	if err != nil {
-		return nil, err
-	}
+	extentLengthInSectors := calculateDirChildrenSectors(wc.root)
 
 	extentLocation := wc.allocSectors(extentLengthInSectors)
 	de := &DirectoryEntry{
@@ -311,10 +328,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 		)
 
 		if cV, ok := c.(map[string]interface{}); ok {
-			extentLengthInSectors, err = calculateDirChildrenSectors(cV)
-			if err != nil {
-				return err
-			}
+			extentLengthInSectors = calculateDirChildrenSectors(cV)
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
 		} else if cV, ok := c.(genericBuffer); ok {
@@ -410,7 +424,7 @@ func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSec
 			toRead = sectorSize
 		}
 
-		if _, err := io.ReadAtLeast(buf, buffer, int(toRead)); err != nil {
+		if _, err := io.ReadFull(buf, buffer[:toRead]); err != nil {
 			return err
 		}
 
@@ -474,23 +488,12 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 		}
 	}
 
+	// Write disk header
 	now := time.Now()
 
 	rootDE, err := wc.createDEForRoot()
 	if err != nil {
 		return fmt.Errorf("creating root directory descriptor: %s", err)
-	}
-
-	wc.itemsToWrite.PushBack(itemToWrite{
-		value:        wc.root,
-		dirPath:      "",
-		ownEntry:     rootDE,
-		parentEntry:  rootDE,
-		targetSector: uint32(rootDE.ExtentLocation),
-	})
-
-	if err = wc.writeAll(); err != nil {
-		return fmt.Errorf("writing files: %s", err)
 	}
 
 	pvd := volumeDescriptor{
@@ -502,7 +505,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 		Primary: &PrimaryVolumeDescriptorBody{
 			SystemIdentifier:              runtime.GOOS,
 			VolumeIdentifier:              volumeIdentifier,
-			VolumeSpaceSize:               int32(wc.freeSectorPointer),
+			VolumeSpaceSize:               int32(recursiveDirSectorCount(wc.root) + 18), // 18 sectors reserved at beginning of disk
 			VolumeSetSize:                 1,
 			VolumeSequenceNumber:          1,
 			LogicalBlockSize:              int16(sectorSize),
@@ -546,6 +549,19 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	}
 	if err = wc.writeSector(buffer, 17); err != nil {
 		return err
+	}
+
+	// Write disk data
+	wc.itemsToWrite.PushBack(itemToWrite{
+		value:        wc.root,
+		dirPath:      "",
+		ownEntry:     rootDE,
+		parentEntry:  rootDE,
+		targetSector: uint32(rootDE.ExtentLocation),
+	})
+
+	if err = wc.writeAll(); err != nil {
+		return fmt.Errorf("writing files: %s", err)
 	}
 
 	return nil
