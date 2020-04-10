@@ -504,7 +504,14 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		bootCatInfo := wc.iw.lookupTable[iw.Catalog]
 		binary.LittleEndian.PutUint32(boot.BootSystemUse[:4], bootCatInfo.meta().targetSector)
 
-		// then for each file...
+		// generate catalog
+		data, err := encodeBootCatalogs(iw.boot)
+		if err != nil {
+			return err
+		}
+
+		// overwrite bootCat with data so it will be written to disk
+		copy(bootCat, data)
 	}
 
 	// write 16 sectors of zeroes

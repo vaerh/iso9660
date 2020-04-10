@@ -14,6 +14,8 @@ type bootCatalogEntry struct {
 	file       Item
 }
 
+// encodeBootCatalogs must be called after prepareAll so that targetSector is
+// populated.
 func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 	// transform a list of catalog entries into binary catalog
 	buf := &bytes.Buffer{}
