@@ -71,7 +71,7 @@ func NewWriter() (*ImageWriter, error) {
 		root:    make(map[string]interface{}),
 		Primary: Primary,
 		vd: []*volumeDescriptor{
-			&volumeDescriptor{
+			{
 				Header: volumeDescriptorHeader{
 					Type:       volumeTypePrimary,
 					Identifier: standardIdentifierBytes,
