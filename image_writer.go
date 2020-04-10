@@ -423,6 +423,11 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 
 // writeSectorBuf will copy the given buffer to the image
 func (wc *writeContext) writeSectorBuf(buf Item) error {
+	if buf.meta().targetSector != wc.writeSecPos {
+		// invalid location
+		return errors.New("invalid write: sector position is not valid")
+	}
+
 	n, err := io.Copy(wc.w, buf)
 	if err != nil {
 		return err
