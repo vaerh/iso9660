@@ -32,13 +32,43 @@ var (
 // ImageWriter is responsible for staging an image's contents
 // and writing them to an image.
 type ImageWriter struct {
-	root map[string]interface{}
+	root    map[string]interface{}
+	Primary *PrimaryVolumeDescriptorBody
 }
 
 // NewWriter creates a new ImageWrite.
 func NewWriter() (*ImageWriter, error) {
+	now := time.Now()
+
 	return &ImageWriter{
 		root: make(map[string]interface{}),
+		Primary: &PrimaryVolumeDescriptorBody{
+			SystemIdentifier:              runtime.GOOS,
+			VolumeIdentifier:              "UNNAMED",
+			VolumeSpaceSize:               0, // this will be calculated upon finalization of disk
+			VolumeSetSize:                 1,
+			VolumeSequenceNumber:          1,
+			LogicalBlockSize:              int16(sectorSize),
+			PathTableSize:                 0,
+			TypeLPathTableLoc:             0,
+			OptTypeLPathTableLoc:          0,
+			TypeMPathTableLoc:             0,
+			OptTypeMPathTableLoc:          0,
+			RootDirectoryEntry:            nil, // this will be calculated upon finalization of disk
+			VolumeSetIdentifier:           "",
+			PublisherIdentifier:           "",
+			DataPreparerIdentifier:        "",
+			ApplicationIdentifier:         "github.com/KarpelesLab/iso9660",
+			CopyrightFileIdentifier:       "",
+			AbstractFileIdentifier:        "",
+			BibliographicFileIdentifier:   "",
+			VolumeCreationDateAndTime:     VolumeDescriptorTimestampFromTime(now),
+			VolumeModificationDateAndTime: VolumeDescriptorTimestampFromTime(now),
+			VolumeExpirationDateAndTime:   VolumeDescriptorTimestamp{},
+			VolumeEffectiveDateAndTime:    VolumeDescriptorTimestampFromTime(now),
+			FileStructureVersion:          1,
+			ApplicationUsed:               [512]byte{},
+		},
 	}, nil
 }
 
@@ -469,7 +499,7 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 	return err
 }
 
-func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
+func (iw *ImageWriter) WriteTo(wa io.WriterAt) error {
 	buffer := make([]byte, sectorSize)
 	var err error
 
@@ -489,12 +519,13 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	}
 
 	// Write disk header
-	now := time.Now()
-
 	rootDE, err := wc.createDEForRoot()
 	if err != nil {
 		return fmt.Errorf("creating root directory descriptor: %s", err)
 	}
+
+	iw.Primary.VolumeSpaceSize = int32(recursiveDirSectorCount(wc.root) + 18) // 18 sectors reserved at beginning of disk
+	iw.Primary.RootDirectoryEntry = rootDE
 
 	pvd := volumeDescriptor{
 		Header: volumeDescriptorHeader{
@@ -502,33 +533,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 			Identifier: standardIdentifierBytes,
 			Version:    1,
 		},
-		Primary: &PrimaryVolumeDescriptorBody{
-			SystemIdentifier:              runtime.GOOS,
-			VolumeIdentifier:              volumeIdentifier,
-			VolumeSpaceSize:               int32(recursiveDirSectorCount(wc.root) + 18), // 18 sectors reserved at beginning of disk
-			VolumeSetSize:                 1,
-			VolumeSequenceNumber:          1,
-			LogicalBlockSize:              int16(sectorSize),
-			PathTableSize:                 0,
-			TypeLPathTableLoc:             0,
-			OptTypeLPathTableLoc:          0,
-			TypeMPathTableLoc:             0,
-			OptTypeMPathTableLoc:          0,
-			RootDirectoryEntry:            rootDE,
-			VolumeSetIdentifier:           "",
-			PublisherIdentifier:           "",
-			DataPreparerIdentifier:        "",
-			ApplicationIdentifier:         "github.com/KarpelesLab/iso9660",
-			CopyrightFileIdentifier:       "",
-			AbstractFileIdentifier:        "",
-			BibliographicFileIdentifier:   "",
-			VolumeCreationDateAndTime:     VolumeDescriptorTimestampFromTime(now),
-			VolumeModificationDateAndTime: VolumeDescriptorTimestampFromTime(now),
-			VolumeExpirationDateAndTime:   VolumeDescriptorTimestamp{},
-			VolumeEffectiveDateAndTime:    VolumeDescriptorTimestampFromTime(now),
-			FileStructureVersion:          1,
-			ApplicationUsed:               [512]byte{},
-		},
+		Primary: iw.Primary,
 	}
 	if buffer, err = pvd.MarshalBinary(); err != nil {
 		return err
