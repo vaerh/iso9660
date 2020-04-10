@@ -52,7 +52,7 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 		// sec count depends if we are a uefi file or not (uefi needs file size)
 		if b.platformId == 0xef {
 			// UEFI
-			f := b.fileData.value.(DataSource)
+			f := b.fileData.value.(Item)
 			siz := f.Size()
 			sizSec := uint16(siz / 512)
 			if siz%512 != 0 {

@@ -6,32 +6,34 @@ import (
 	"os"
 )
 
-type DataSource interface {
+type Item interface {
 	io.Reader
 	Size() int64
 	Close() error
 }
 
-// fileHandler returns a generic interface for various kind of files or buffers
-func NewBufferSource(in io.Reader) DataSource {
-	switch v := in.(type) {
-	case DataSource:
-		return v
+func NewItemReader(r io.Reader) (Item, error) {
+	switch v := r.(type) {
+	case Item:
+		return v, nil
 	case *os.File:
-		return &fileHndlr{v}
+		return &fileHndlr{v}, nil
 	case *bytes.Reader:
-		return &bufHndlr{v}
+		return &bufHndlr{v}, nil
 	case *bytes.Buffer:
-		return &bufHndlr{bytes.NewReader(v.Bytes())}
+		return &bufHndlr{bytes.NewReader(v.Bytes())}, nil
 	default:
 		buf := &bytes.Buffer{}
-		io.Copy(buf, in)
+		_, err := io.Copy(buf, r)
+		if err != nil {
+			return nil, err
+		}
 		r := bytes.NewReader(buf.Bytes())
-		return &bufHndlr{r}
+		return &bufHndlr{r}, nil
 	}
 }
 
-func NewFileSource(filename string) (DataSource, error) {
+func NewItemFile(filename string) (Item, error) {
 	st, err := os.Stat(filename)
 	if err != nil {
 		return nil, err

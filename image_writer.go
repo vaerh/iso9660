@@ -3,6 +3,7 @@ package iso9660
 import (
 	"bytes"
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -91,7 +92,7 @@ func (iw *ImageWriter) Cleanup() error {
 	return nil
 }
 
-func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath string, data DataSource) error {
+func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath string, data Item) error {
 	directoryPath, fileName := manglePath(filePath)
 
 	pos, err := iw.getDir(directoryPath)
@@ -104,7 +105,12 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 		return os.ErrExist
 	}
 
-	pos[fileName] = NewBufferSource(data)
+	item, err := NewItemReader(data)
+	if err != nil {
+		return err
+	}
+
+	pos[fileName] = item
 
 	// add boot record
 	iw.boot = append(iw.boot, &bootCatalogEntry{
@@ -151,7 +157,12 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return os.ErrExist
 	}
 
-	pos[fileName] = NewBufferSource(data)
+	item, err := NewItemReader(data)
+	if err != nil {
+		return err
+	}
+
+	pos[fileName] = item
 	return nil
 }
 
@@ -159,7 +170,7 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 // localPath must be an existing and readable file, and filePath will be the path
 // on the ISO image.
 func (iw *ImageWriter) AddLocalFile(localPath, filePath string) error {
-	buf, err := NewFileSource(localPath)
+	buf, err := NewItemFile(localPath)
 	if err != nil {
 		return fmt.Errorf("unable to add local file: %w", err)
 	}
@@ -209,7 +220,7 @@ func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
 		switch v := sub.(type) {
 		case map[string]interface{}:
 			sec += recursiveDirSectorCount(v)
-		case DataSource:
+		case Item:
 			sec += fileLengthToSectors(uint32(v.Size()))
 		default:
 			panic("this should not happen")
@@ -225,7 +236,7 @@ type writeContext struct {
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
 	itemsToWrite      *list.List              // simple fifo used during
-	items             []DataSource            // items in the right order for final write
+	items             []Item                  // items in the right order for final write
 	lookupTable       map[string]*itemToWrite // allows quick lookup of any given item
 	writeSecPos       uint32
 	emptySector       []byte // a sector-sized buffer of zeroes
@@ -259,7 +270,7 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 }
 
 type itemToWrite struct {
-	value        interface{} // can be map[string]interface{} or DataSource
+	value        interface{} // can be map[string]interface{} or Item
 	dirPath      string
 	ownEntry     *DirectoryEntry
 	parentEntry  *DirectoryEntry
@@ -312,7 +323,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			extentLengthInSectors = calculateDirChildrenSectors(cV)
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
-		} else if cV, ok := c.(DataSource); ok {
+		} else if cV, ok := c.(Item); ok {
 			if cV.Size() > int64(math.MaxUint32) {
 				return ErrFileTooLarge
 			}
@@ -359,7 +370,11 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 		if uint32(buf.Len()+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			wc.items = append(wc.items, NewBufferSource(buf))
+			item, err := NewItemReader(buf)
+			if err != nil {
+				return err
+			}
+			wc.items = append(wc.items, item)
 			buf = &bytes.Buffer{} // do not use buf.Reset() to ensure we have a new memory area
 		}
 
@@ -371,13 +386,17 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 	// unless we reached the exact end of the sector
 	if buf.Len() > 0 {
-		wc.items = append(wc.items, NewBufferSource(buf))
+		item, err := NewItemReader(buf)
+		if err != nil {
+			return err
+		}
+		wc.items = append(wc.items, item)
 	}
 
 	return nil
 }
 
-func (wc *writeContext) processFile(dirPath string, buf DataSource, targetSector uint32) error {
+func (wc *writeContext) processFile(dirPath string, buf Item, targetSector uint32) error {
 	if buf.Size() > int64(math.MaxUint32) {
 		return ErrFileTooLarge
 	}
@@ -411,7 +430,7 @@ func (wc *writeContext) processAll() error {
 		var err error
 		if cV, ok := it.value.(map[string]interface{}); ok {
 			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntry, it.targetSector)
-		} else if cV, ok := it.value.(DataSource); ok {
+		} else if cV, ok := it.value.(Item); ok {
 			err = wc.processFile(it.dirPath, cV, it.targetSector)
 		} else {
 			panic("shouldn't happen")
@@ -454,7 +473,7 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 }
 
 // writeSectorBuf will copy the given buffer to the image
-func (wc *writeContext) writeSectorBuf(buf DataSource) error {
+func (wc *writeContext) writeSectorBuf(buf Item) error {
 	n, err := io.Copy(wc.w, buf)
 	if err != nil {
 		return err
@@ -495,7 +514,7 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		bootCat = make([]byte, 2048)
 
 		// add boot catalog
-		err = iw.AddFile(NewBufferSource(bytes.NewReader(bootCat)), iw.Catalog)
+		err = iw.AddFile(&bufHndlr{bytes.NewReader(bootCat)}, iw.Catalog)
 		if err != nil {
 			return err
 		}
@@ -540,6 +559,11 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 
 	if len(iw.boot) > 0 {
 		// we have a boot catalog to make!
+		// First, grab the location of boot catalog
+		bootCatInfo := wc.lookupTable[iw.Catalog]
+		binary.LittleEndian.PutUint32(boot.BootSystemUse[:4], bootCatInfo.targetSector)
+
+		// then for each file...
 	}
 
 	// write 16 sectors of zeroes
