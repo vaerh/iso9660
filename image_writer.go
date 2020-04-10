@@ -33,6 +33,7 @@ var (
 type ImageWriter struct {
 	root    map[string]interface{}
 	Primary *PrimaryVolumeDescriptorBody
+	Boot    *BootVolumeDescriptorBody
 }
 
 // NewWriter creates a new ImageWrite.
@@ -278,6 +279,7 @@ type writeContext struct {
 	itemsToWrite      *list.List     // simple fifo used during
 	items             []*itemToWrite // items in the right order for final write
 	writeSecPos       uint32
+	emptySector       []byte // a sector-sized buffer of zeroes
 }
 
 // allocSectors will allocate a number of sectors and return the first free position
@@ -498,9 +500,9 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 	secCnt := uint32(len(buffer)) / sectorSize
 	if secBytes := uint32(len(buffer)) % sectorSize; secBytes != 0 {
 		secCnt += 1
-		// add zeroes
+		// add zeroes using wc.emptySector (which is a sector-sized buffer of zeroes)
 		extra := sectorSize - secBytes
-		wc.wa.Write(make([]byte, extra)) // TODO
+		wc.wa.Write(wc.emptySector[:extra])
 	}
 
 	wc.writeSecPos += secCnt
@@ -508,7 +510,6 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 }
 
 func (iw *ImageWriter) WriteTo(wa io.Writer) error {
-	buffer := make([]byte, sectorSize)
 	var err error
 
 	wc := writeContext{
@@ -518,13 +519,7 @@ func (iw *ImageWriter) WriteTo(wa io.Writer) error {
 		freeSectorPointer: 18, // system area (16) + 2 volume descriptors
 		itemsToWrite:      list.New(),
 		writeSecPos:       0,
-	}
-
-	// write 16 sectors of zeroes
-	for i := uint32(0); i < 16; i++ {
-		if err = wc.writeSector(buffer, i); err != nil {
-			return err
-		}
+		emptySector:       make([]byte, sectorSize),
 	}
 
 	// Write disk header
@@ -536,33 +531,55 @@ func (iw *ImageWriter) WriteTo(wa io.Writer) error {
 	iw.Primary.VolumeSpaceSize = int32(recursiveDirSectorCount(iw.root) + 18) // 18 sectors reserved at beginning of disk
 	iw.Primary.RootDirectoryEntry = rootDE
 
-	pvd := volumeDescriptor{
-		Header: volumeDescriptorHeader{
-			Type:       volumeTypePrimary,
-			Identifier: standardIdentifierBytes,
-			Version:    1,
-		},
-		Primary: iw.Primary,
-	}
-	if buffer, err = pvd.MarshalBinary(); err != nil {
-		return err
-	}
-	if err = wc.writeSector(buffer, 16); err != nil {
-		return err
-	}
+	// write initial 18 sectors of zeroes
+	for i := uint32(0); i < 18; i++ {
+		buffer := wc.emptySector
 
-	terminator := volumeDescriptor{
-		Header: volumeDescriptorHeader{
-			Type:       volumeTypeTerminator,
-			Identifier: standardIdentifierBytes,
-			Version:    1,
-		},
-	}
-	if buffer, err = terminator.MarshalBinary(); err != nil {
-		return err
-	}
-	if err = wc.writeSector(buffer, 17); err != nil {
-		return err
+		switch i {
+		case 11:
+			if iw.Boot == nil {
+				break
+			}
+
+			pvd := volumeDescriptor{
+				Header: volumeDescriptorHeader{
+					Type:       volumeTypeBoot,
+					Identifier: standardIdentifierBytes,
+					Version:    1,
+				},
+				Boot: iw.Boot,
+			}
+			if buffer, err = pvd.MarshalBinary(); err != nil {
+				return err
+			}
+		case 16:
+			pvd := volumeDescriptor{
+				Header: volumeDescriptorHeader{
+					Type:       volumeTypePrimary,
+					Identifier: standardIdentifierBytes,
+					Version:    1,
+				},
+				Primary: iw.Primary,
+			}
+			if buffer, err = pvd.MarshalBinary(); err != nil {
+				return err
+			}
+		case 17:
+			terminator := volumeDescriptor{
+				Header: volumeDescriptorHeader{
+					Type:       volumeTypeTerminator,
+					Identifier: standardIdentifierBytes,
+					Version:    1,
+				},
+			}
+			if buffer, err = terminator.MarshalBinary(); err != nil {
+				return err
+			}
+		}
+
+		if err = wc.writeSector(buffer, i); err != nil {
+			return err
+		}
 	}
 
 	// Write disk data
