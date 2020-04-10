@@ -33,7 +33,9 @@ var (
 type ImageWriter struct {
 	root    map[string]interface{}
 	Primary *PrimaryVolumeDescriptorBody
+	Catalog string // Catalog is the path of the boot catalog on disk. Defaults to "BOOT.CAT"
 	vd      []*volumeDescriptor
+	boot    []*bootCatalogEntry // boot entries
 }
 
 // NewWriter creates a new ImageWrite.
@@ -70,6 +72,7 @@ func NewWriter() (*ImageWriter, error) {
 	return &ImageWriter{
 		root:    make(map[string]interface{}),
 		Primary: Primary,
+		Catalog: "BOOT.CAT",
 		vd: []*volumeDescriptor{
 			{
 				Header: volumeDescriptorHeader{
@@ -98,6 +101,30 @@ func (iw *ImageWriter) AddBoot(boot *BootVolumeDescriptorBody) {
 		},
 		Boot: boot,
 	})
+}
+
+func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath string, data DataSource) error {
+	directoryPath, fileName := manglePath(filePath)
+
+	pos, err := iw.getDir(directoryPath)
+	if err != nil {
+		return err
+	}
+
+	if _, ok := pos[fileName]; ok {
+		// duplicate
+		return os.ErrExist
+	}
+
+	pos[fileName] = NewBufferSource(data)
+
+	// add boot record
+	iw.boot = append(iw.boot, &bootCatalogEntry{
+		platformId: platformId,
+		bootMedia:  bootMedia,
+		file:       path.Join(directoryPath, fileName),
+	})
+	return nil
 }
 
 func (iw *ImageWriter) getDir(directoryPath string) (map[string]interface{}, error) {
@@ -136,7 +163,7 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return os.ErrExist
 	}
 
-	pos[fileName] = newBuffer(data)
+	pos[fileName] = NewBufferSource(data)
 	return nil
 }
 
@@ -144,25 +171,12 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 // localPath must be an existing and readable file, and filePath will be the path
 // on the ISO image.
 func (iw *ImageWriter) AddLocalFile(localPath, filePath string) error {
-	buf, err := newFileBuffer(localPath)
+	buf, err := NewFileSource(localPath)
 	if err != nil {
 		return fmt.Errorf("unable to add local file: %w", err)
 	}
 
-	directoryPath, fileName := manglePath(filePath)
-
-	pos, err := iw.getDir(directoryPath)
-	if err != nil {
-		return err
-	}
-
-	if _, ok := pos[fileName]; ok {
-		// duplicate
-		return os.ErrExist
-	}
-
-	pos[fileName] = buf
-	return nil
+	return iw.AddFile(buf, filePath)
 }
 
 // calculateDirChildrenSectors returns size of a given dir entry
@@ -207,7 +221,7 @@ func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
 		switch v := sub.(type) {
 		case map[string]interface{}:
 			sec += recursiveDirSectorCount(v)
-		case genericBuffer:
+		case DataSource:
 			sec += fileLengthToSectors(uint32(v.Size()))
 		default:
 			panic("this should not happen")
@@ -223,7 +237,7 @@ type writeContext struct {
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
 	itemsToWrite      *list.List              // simple fifo used during
-	items             []genericBuffer         // items in the right order for final write
+	items             []DataSource            // items in the right order for final write
 	lookupTable       map[string]*itemToWrite // allows quick lookup of any given item
 	writeSecPos       uint32
 	emptySector       []byte // a sector-sized buffer of zeroes
@@ -257,7 +271,7 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 }
 
 type itemToWrite struct {
-	value        interface{} // can be map[string]interface{} or genericBuffer
+	value        interface{} // can be map[string]interface{} or DataSource
 	dirPath      string
 	ownEntry     *DirectoryEntry
 	parentEntry  *DirectoryEntry
@@ -310,7 +324,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			extentLengthInSectors = calculateDirChildrenSectors(cV)
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
-		} else if cV, ok := c.(genericBuffer); ok {
+		} else if cV, ok := c.(DataSource); ok {
 			if cV.Size() > int64(math.MaxUint32) {
 				return ErrFileTooLarge
 			}
@@ -357,7 +371,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 		if uint32(buf.Len()+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			wc.items = append(wc.items, newBuffer(buf))
+			wc.items = append(wc.items, NewBufferSource(buf))
 			buf = &bytes.Buffer{} // do not use buf.Reset() to ensure we have a new memory area
 		}
 
@@ -369,13 +383,13 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 	// unless we reached the exact end of the sector
 	if buf.Len() > 0 {
-		wc.items = append(wc.items, newBuffer(buf))
+		wc.items = append(wc.items, NewBufferSource(buf))
 	}
 
 	return nil
 }
 
-func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSector uint32) error {
+func (wc *writeContext) processFile(dirPath string, buf DataSource, targetSector uint32) error {
 	if buf.Size() > int64(math.MaxUint32) {
 		return ErrFileTooLarge
 	}
@@ -391,7 +405,7 @@ func (wc *writeContext) processAll() error {
 		var err error
 		if cV, ok := it.value.(map[string]interface{}); ok {
 			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntry, it.targetSector)
-		} else if cV, ok := it.value.(genericBuffer); ok {
+		} else if cV, ok := it.value.(DataSource); ok {
 			err = wc.processFile(it.dirPath, cV, it.targetSector)
 		} else {
 			panic("shouldn't happen")
@@ -434,7 +448,7 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 }
 
 // writeSectorBuf will copy the given buffer to the image
-func (wc *writeContext) writeSectorBuf(buf genericBuffer) error {
+func (wc *writeContext) writeSectorBuf(buf DataSource) error {
 	n, err := io.Copy(wc.w, buf)
 	if err != nil {
 		return err

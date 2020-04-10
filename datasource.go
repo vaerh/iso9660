@@ -6,16 +6,16 @@ import (
 	"os"
 )
 
-type genericBuffer interface {
+type DataSource interface {
 	io.Reader
 	Size() int64
 	Close() error
 }
 
 // fileHandler returns a generic interface for various kind of files or buffers
-func newBuffer(in io.Reader) genericBuffer {
+func NewBufferSource(in io.Reader) DataSource {
 	switch v := in.(type) {
-	case genericBuffer:
+	case DataSource:
 		return v
 	case *os.File:
 		return &fileHndlr{v}
@@ -31,7 +31,7 @@ func newBuffer(in io.Reader) genericBuffer {
 	}
 }
 
-func newFileBuffer(filename string) (genericBuffer, error) {
+func NewFileSource(filename string) (DataSource, error) {
 	st, err := os.Stat(filename)
 	if err != nil {
 		return nil, err
