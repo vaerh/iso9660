@@ -1,10 +1,12 @@
 package iso9660
 
 import (
+	"bytes"
 	"container/list"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path"
@@ -267,7 +269,7 @@ type itemToWrite struct {
 }
 
 func (wc *writeContext) processDirectory(dirPath string, dir map[string]interface{}, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
-	var writeOffset uint32
+	buf := &bytes.Buffer{}
 
 	currentDE := ownEntry.Clone()
 	currentDE.Identifier = string([]byte{0})
@@ -283,16 +285,14 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 		return err
 	}
 
-	n, err := wc.wa.WriteAt(currentDEData, int64((targetSector*sectorSize)+writeOffset))
+	_, err = buf.Write(currentDEData)
 	if err != nil {
 		return err
 	}
-	writeOffset += uint32(n)
-	n, err = wc.wa.WriteAt(parentDEData, int64((targetSector*sectorSize)+writeOffset))
+	_, err = buf.Write(parentDEData)
 	if err != nil {
 		return err
 	}
-	writeOffset += uint32(n)
 
 	// here we need to proceed in alphabetical order so tests aren't broken
 	names := make([]string, 0, len(dir))
@@ -357,32 +357,36 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			return err
 		}
 
-		if writeOffset+uint32(len(data)) > sectorSize {
+		if uint32(buf.Len()+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			if writeOffset < sectorSize {
-				// write the 0 size marker, telling the reader that the next entry is on the next sector
-				n, err = wc.wa.WriteAt([]byte{}, int64((targetSector*sectorSize)+writeOffset))
-				if err != nil {
-					return err
-				}
+			if uint32(buf.Len()) < sectorSize {
+				// fill to sector size
+				t := make([]byte, sectorSize-uint32(buf.Len())) // TODO better method?
+				buf.Write(t)
 			}
 
-			// skip to the next sector
-			writeOffset = 0
-			targetSector += 1
+			err = wc.writeSector(buf.Bytes(), targetSector)
+			if err != nil {
+				return err
+			}
+			buf.Reset()
 		}
 
-		n, err = wc.wa.WriteAt(data, int64((targetSector*sectorSize)+writeOffset))
+		_, err = buf.Write(data)
 		if err != nil {
 			return err
 		}
-		writeOffset += uint32(n)
 	}
 
 	// unless we reached the exact end of the sector
-	if writeOffset < sectorSize {
-		// write the 0 size marker, telling the reader that the next entry is on the next sector
-		n, err = wc.wa.WriteAt([]byte{}, int64((targetSector*sectorSize)+writeOffset))
+	if buf.Len() > 0 {
+		if uint32(buf.Len()) < sectorSize {
+			// fill to sector size
+			t := make([]byte, sectorSize-uint32(buf.Len())) // TODO better method?
+			buf.Write(t)
+		}
+
+		err = wc.writeSector(buf.Bytes(), targetSector)
 		if err != nil {
 			return err
 		}
@@ -410,7 +414,7 @@ func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSec
 			return err
 		}
 
-		if _, err := wc.wa.WriteAt(buffer, int64(targetSector*sectorSize)); err != nil {
+		if err := wc.writeSector(buffer, targetSector); err != nil {
 			return err
 		}
 
@@ -445,18 +449,15 @@ func (wc *writeContext) writeAll() error {
 	return nil
 }
 
+func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
+	log.Printf("Writing sector %d (%d bytes)", sector, len(buffer))
+	_, err := wc.wa.WriteAt(buffer, int64(sectorSize*sector))
+	return err
+}
+
 func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	buffer := make([]byte, sectorSize)
 	var err error
-
-	// write 16 sectors of zeroes
-	for i := uint32(0); i < 16; i++ {
-		if _, err = wa.WriteAt(buffer, int64(sectorSize*i)); err != nil {
-			return err
-		}
-	}
-
-	now := time.Now()
 
 	wc := writeContext{
 		root:              iw.root,
@@ -465,6 +466,15 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 		freeSectorPointer: 18, // system area (16) + 2 volume descriptors
 		itemsToWrite:      list.New(),
 	}
+
+	// write 16 sectors of zeroes
+	for i := uint32(0); i < 16; i++ {
+		if err = wc.writeSector(buffer, i); err != nil {
+			return err
+		}
+	}
+
+	now := time.Now()
 
 	rootDE, err := wc.createDEForRoot()
 	if err != nil {
@@ -520,7 +530,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	if buffer, err = pvd.MarshalBinary(); err != nil {
 		return err
 	}
-	if _, err = wa.WriteAt(buffer, int64(sectorSize*16)); err != nil {
+	if err = wc.writeSector(buffer, 16); err != nil {
 		return err
 	}
 
@@ -534,7 +544,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 	if buffer, err = terminator.MarshalBinary(); err != nil {
 		return err
 	}
-	if _, err = wa.WriteAt(buffer, int64(sectorSize*17)); err != nil {
+	if err = wc.writeSector(buffer, 17); err != nil {
 		return err
 	}
 
