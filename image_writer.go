@@ -222,8 +222,8 @@ type writeContext struct {
 	w                 io.Writer
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
-	itemsToWrite      *list.List     // simple fifo used during
-	items             []*itemToWrite // items in the right order for final write
+	itemsToWrite      *list.List      // simple fifo used during
+	items             []genericBuffer // items in the right order for final write
 	writeSecPos       uint32
 	emptySector       []byte // a sector-sized buffer of zeroes
 }
@@ -351,11 +351,8 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 		if uint32(buf.Len()+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			err = wc.writeSector(buf.Bytes(), targetSector)
-			if err != nil {
-				return err
-			}
-			buf.Reset()
+			wc.items = append(wc.items, newBuffer(buf))
+			buf = &bytes.Buffer{} // do not use buf.Reset() to ensure we have a new memory area
 		}
 
 		_, err = buf.Write(data)
@@ -366,10 +363,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 
 	// unless we reached the exact end of the sector
 	if buf.Len() > 0 {
-		err = wc.writeSector(buf.Bytes(), targetSector)
-		if err != nil {
-			return err
-		}
+		wc.items = append(wc.items, newBuffer(buf))
 	}
 
 	return nil
@@ -380,34 +374,12 @@ func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSec
 		return ErrFileTooLarge
 	}
 
-	buffer := make([]byte, sectorSize)
-
-	for bytesLeft := uint32(buf.Size()); bytesLeft > 0; {
-		var toRead uint32
-		if bytesLeft < sectorSize {
-			toRead = bytesLeft
-		} else {
-			toRead = sectorSize
-		}
-
-		if _, err := io.ReadFull(buf, buffer[:toRead]); err != nil {
-			return err
-		}
-
-		if err := wc.writeSector(buffer, targetSector); err != nil {
-			return err
-		}
-
-		targetSector++
-		bytesLeft -= toRead
-	}
-
-	buf.Close()
+	wc.items = append(wc.items, buf)
 
 	return nil
 }
 
-func (wc *writeContext) writeAll() error {
+func (wc *writeContext) processAll() error {
 	for item := wc.itemsToWrite.Front(); wc.itemsToWrite.Len() > 0; item = wc.itemsToWrite.Front() {
 		it := item.Value.(itemToWrite)
 		var err error
@@ -455,6 +427,25 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 	return nil
 }
 
+// writeSectorBuf will copy the given buffer to the image
+func (wc *writeContext) writeSectorBuf(buf genericBuffer) error {
+	n, err := io.Copy(wc.w, buf)
+	if err != nil {
+		return err
+	}
+
+	secCnt := uint32(n) / sectorSize
+	if secBytes := uint32(n) % sectorSize; secBytes != 0 {
+		secCnt += 1
+		// add zeroes using wc.emptySector (which is a sector-sized buffer of zeroes)
+		extra := sectorSize - secBytes
+		wc.w.Write(wc.emptySector[:extra])
+	}
+
+	wc.writeSecPos += secCnt
+	return nil
+}
+
 func (wc *writeContext) writeDescriptor(pvd *volumeDescriptor, sector uint32) error {
 	if buffer, err := pvd.MarshalBinary(); err != nil {
 		return err
@@ -466,8 +457,10 @@ func (wc *writeContext) writeDescriptor(pvd *volumeDescriptor, sector uint32) er
 func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	var err error
 
+	vd := iw.vd
+
 	// generate vd list with terminator
-	vd := append(iw.vd, &volumeDescriptor{
+	vd = append(vd, &volumeDescriptor{
 		Header: volumeDescriptorHeader{
 			Type:       volumeTypeTerminator,
 			Identifier: standardIdentifierBytes,
@@ -520,8 +513,18 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		targetSector: uint32(rootDE.ExtentLocation),
 	})
 
-	if err = wc.writeAll(); err != nil {
+	// processAll() will actually prepare the data to be written
+	if err = wc.processAll(); err != nil {
 		return fmt.Errorf("writing files: %s", err)
+	}
+
+	// this actually writes the data to the disk
+	for _, buf := range wc.items {
+		err = wc.writeSectorBuf(buf)
+		if err != nil {
+			return err
+		}
+		buf.Close()
 	}
 
 	return nil

@@ -21,6 +21,8 @@ func newBuffer(in io.Reader) genericBuffer {
 		return &fileHndlr{v}
 	case *bytes.Reader:
 		return &bufHndlr{v}
+	case *bytes.Buffer:
+		return &bufHndlr{bytes.NewReader(v.Bytes())}
 	default:
 		buf := &bytes.Buffer{}
 		io.Copy(buf, in)
