@@ -282,40 +282,43 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 			extentLength          uint32
 		)
 
+		var de *DirectoryEntry
+
 		if cV, ok := c.(*itemDir); ok {
 			extentLengthInSectors = cV.sectors()
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
-		} else if cV, ok := c.(Item); ok {
-			if cV.Size() > int64(math.MaxUint32) {
+		} else {
+			if c.Size() > int64(math.MaxUint32) {
 				return ErrFileTooLarge
 			}
-			extentLength = uint32(cV.Size())
-			extentLengthInSectors = cV.sectors()
+			extentLength = uint32(c.Size())
+			extentLengthInSectors = c.sectors()
+			de = c.meta().ownEntry
 
 			fileFlags = 0
-		} else {
-			panic("this should not happen")
 		}
 
-		extentLocation := wc.allocSectors(extentLengthInSectors)
-		de := &DirectoryEntry{
-			ExtendedAtributeRecordLength: 0,
-			ExtentLocation:               int32(extentLocation),
-			ExtentLength:                 int32(extentLength),
-			RecordingDateTime:            wc.timestamp,
-			FileFlags:                    fileFlags,
-			FileUnitSize:                 0, // 0 for non-interleaved write
-			InterleaveGap:                0, // not interleaved
-			VolumeSequenceNumber:         1, // we only have one volume
-			Identifier:                   name,
-			SystemUse:                    []byte{},
+		if de == nil {
+			extentLocation := wc.allocSectors(extentLengthInSectors)
+			de = &DirectoryEntry{
+				ExtendedAtributeRecordLength: 0,
+				ExtentLocation:               int32(extentLocation),
+				ExtentLength:                 int32(extentLength),
+				RecordingDateTime:            wc.timestamp,
+				FileFlags:                    fileFlags,
+				FileUnitSize:                 0, // 0 for non-interleaved write
+				InterleaveGap:                0, // not interleaved
+				VolumeSequenceNumber:         1, // we only have one volume
+				Identifier:                   name,
+				SystemUse:                    []byte{},
+			}
+
+			c.meta().set(de, ownEntry, uint32(de.ExtentLocation))
+
+			// queue this child for processing
+			wc.itemsToWrite.PushBack(c)
 		}
-
-		c.meta().set(de, ownEntry, uint32(de.ExtentLocation))
-
-		// queue this child for processing
-		wc.itemsToWrite.PushBack(c)
 
 		data, err := de.MarshalBinary()
 		if err != nil {
