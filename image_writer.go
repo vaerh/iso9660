@@ -222,8 +222,9 @@ type writeContext struct {
 	w                 io.Writer
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
-	itemsToWrite      *list.List      // simple fifo used during
-	items             []genericBuffer // items in the right order for final write
+	itemsToWrite      *list.List              // simple fifo used during
+	items             []genericBuffer         // items in the right order for final write
+	lookupTable       map[string]*itemToWrite // allows quick lookup of any given item
 	writeSecPos       uint32
 	emptySector       []byte // a sector-sized buffer of zeroes
 }
@@ -335,14 +336,19 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			SystemUse:                    []byte{},
 		}
 
+		dirPath := path.Join(dirPath, name)
+
 		// queue this child for processing
-		wc.itemsToWrite.PushBack(itemToWrite{
+		item := &itemToWrite{
 			value:        c,
-			dirPath:      path.Join(dirPath, name),
+			dirPath:      dirPath,
 			ownEntry:     de,
 			parentEntry:  ownEntry,
 			targetSector: uint32(de.ExtentLocation),
-		})
+		}
+
+		wc.itemsToWrite.PushBack(item)
+		wc.lookupTable[dirPath] = item
 
 		data, err := de.MarshalBinary()
 		if err != nil {
@@ -381,7 +387,7 @@ func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSec
 
 func (wc *writeContext) processAll() error {
 	for item := wc.itemsToWrite.Front(); wc.itemsToWrite.Len() > 0; item = wc.itemsToWrite.Front() {
-		it := item.Value.(itemToWrite)
+		it := item.Value.(*itemToWrite)
 		var err error
 		if cV, ok := it.value.(map[string]interface{}); ok {
 			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntry, it.targetSector)
@@ -476,6 +482,7 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		itemsToWrite:      list.New(),
 		writeSecPos:       0,
 		emptySector:       make([]byte, sectorSize),
+		lookupTable:       make(map[string]*itemToWrite),
 	}
 
 	// Generate disk header
@@ -505,7 +512,7 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	}
 
 	// Write disk data
-	wc.itemsToWrite.PushBack(itemToWrite{
+	wc.itemsToWrite.PushBack(&itemToWrite{
 		value:        iw.root,
 		dirPath:      "",
 		ownEntry:     rootDE,
