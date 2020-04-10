@@ -32,7 +32,7 @@ var (
 // ImageWriter is responsible for staging an image's contents
 // and writing them to an image.
 type ImageWriter struct {
-	root    map[string]interface{}
+	root    *itemDir
 	Primary *PrimaryVolumeDescriptorBody
 	Catalog string // Catalog is the path of the boot catalog on disk. Defaults to "BOOT.CAT"
 	vd      []*volumeDescriptor
@@ -71,7 +71,7 @@ func NewWriter() (*ImageWriter, error) {
 	}
 
 	return &ImageWriter{
-		root:    make(map[string]interface{}),
+		root:    newDir(),
 		Primary: Primary,
 		Catalog: "BOOT.CAT",
 		vd: []*volumeDescriptor{
@@ -100,7 +100,7 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 		return err
 	}
 
-	if _, ok := pos[fileName]; ok {
+	if _, ok := pos.children[fileName]; ok {
 		// duplicate
 		return os.ErrExist
 	}
@@ -110,7 +110,7 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 		return err
 	}
 
-	pos[fileName] = item
+	pos.children[fileName] = item
 
 	// add boot record
 	iw.boot = append(iw.boot, &bootCatalogEntry{
@@ -121,12 +121,12 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 	return nil
 }
 
-func (iw *ImageWriter) getDir(directoryPath string) (map[string]interface{}, error) {
+func (iw *ImageWriter) getDir(directoryPath string) (*itemDir, error) {
 	dp := strings.Split(directoryPath, "/")
 	pos := iw.root
 	for _, seg := range dp {
-		if v, ok := pos[seg]; ok {
-			if rV, ok := v.(map[string]interface{}); ok {
+		if v, ok := pos.children[seg]; ok {
+			if rV, ok := v.(*itemDir); ok {
 				pos = rV
 				continue
 			}
@@ -134,8 +134,8 @@ func (iw *ImageWriter) getDir(directoryPath string) (map[string]interface{}, err
 			return nil, ErrIsDir
 		}
 		// not found → add
-		n := make(map[string]interface{})
-		pos[seg] = n
+		n := newDir()
+		pos.children[seg] = n
 		pos = n
 	}
 
@@ -152,7 +152,7 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return err
 	}
 
-	if _, ok := pos[fileName]; ok {
+	if _, ok := pos.children[fileName]; ok {
 		// duplicate
 		return os.ErrExist
 	}
@@ -162,7 +162,7 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return err
 	}
 
-	pos[fileName] = item
+	pos.children[fileName] = item
 	return nil
 }
 
@@ -178,31 +178,6 @@ func (iw *ImageWriter) AddLocalFile(localPath, filePath string) error {
 	return iw.AddFile(buf, filePath)
 }
 
-// calculateDirChildrenSectors returns size of a given dir entry
-func calculateDirChildrenSectors(dir map[string]interface{}) uint32 {
-	var sectors uint32
-	var currentSectorOccupied uint32 = 68 // the 0x00 and 0x01 entries
-
-	for name := range dir {
-		identifierLen := len(name)
-		idPaddingLen := (identifierLen + 1) % 2
-		entryLength := uint32(33 + identifierLen + idPaddingLen)
-
-		if currentSectorOccupied+entryLength > sectorSize {
-			sectors += 1
-			currentSectorOccupied = entryLength
-		} else {
-			currentSectorOccupied += entryLength
-		}
-	}
-
-	if currentSectorOccupied > 0 {
-		sectors += 1
-	}
-
-	return sectors
-}
-
 // fileLengthToSectors returns size of a file in sectors
 func fileLengthToSectors(l uint32) uint32 {
 	if (l % sectorSize) == 0 {
@@ -212,13 +187,13 @@ func fileLengthToSectors(l uint32) uint32 {
 	return (l / sectorSize) + 1
 }
 
-func recursiveDirSectorCount(dir map[string]interface{}) uint32 {
+func recursiveDirSectorCount(dir *itemDir) uint32 {
 	// count sectors required for everything in a given dir (typically root)
-	sec := calculateDirChildrenSectors(dir) // own data space
+	sec := dir.sectors() // own data space
 
-	for _, sub := range dir {
+	for _, sub := range dir.children {
 		switch v := sub.(type) {
-		case map[string]interface{}:
+		case *itemDir:
 			sec += recursiveDirSectorCount(v)
 		case Item:
 			sec += fileLengthToSectors(uint32(v.Size()))
@@ -251,7 +226,7 @@ func (wc *writeContext) allocSectors(count uint32) uint32 {
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
-	extentLengthInSectors := calculateDirChildrenSectors(wc.iw.root)
+	extentLengthInSectors := wc.iw.root.sectors()
 
 	extentLocation := wc.allocSectors(extentLengthInSectors)
 	de := &DirectoryEntry{
@@ -270,14 +245,14 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 }
 
 type itemToWrite struct {
-	value        interface{} // can be map[string]interface{} or Item
+	value        Item
 	dirPath      string
 	ownEntry     *DirectoryEntry
 	parentEntry  *DirectoryEntry
 	targetSector uint32
 }
 
-func (wc *writeContext) processDirectory(dirPath string, dir map[string]interface{}, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
+func (wc *writeContext) processDirectory(dirPath string, dir *itemDir, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
 	buf := &bytes.Buffer{}
 
 	currentDE := ownEntry.Clone()
@@ -304,14 +279,14 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 	}
 
 	// here we need to proceed in alphabetical order so tests aren't broken
-	names := make([]string, 0, len(dir))
-	for name := range dir {
+	names := make([]string, 0, len(dir.children))
+	for name := range dir.children {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
 
 	for _, name := range names {
-		c := dir[name]
+		c := dir.children[name]
 
 		var (
 			fileFlags             byte
@@ -319,8 +294,8 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			extentLength          uint32
 		)
 
-		if cV, ok := c.(map[string]interface{}); ok {
-			extentLengthInSectors = calculateDirChildrenSectors(cV)
+		if cV, ok := c.(*itemDir); ok {
+			extentLengthInSectors = cV.sectors()
 			fileFlags = dirFlagDir
 			extentLength = extentLengthInSectors * sectorSize
 		} else if cV, ok := c.(Item); ok {
@@ -428,7 +403,7 @@ func (wc *writeContext) processAll() error {
 	for item := wc.itemsToWrite.Front(); wc.itemsToWrite.Len() > 0; item = wc.itemsToWrite.Front() {
 		it := item.Value.(*itemToWrite)
 		var err error
-		if cV, ok := it.value.(map[string]interface{}); ok {
+		if cV, ok := it.value.(*itemDir); ok {
 			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntry, it.targetSector)
 		} else if cV, ok := it.value.(Item); ok {
 			err = wc.processFile(it.dirPath, cV, it.targetSector)
