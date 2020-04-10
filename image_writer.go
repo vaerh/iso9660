@@ -117,7 +117,7 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 	iw.boot = append(iw.boot, &bootCatalogEntry{
 		platformId: platformId,
 		bootMedia:  bootMedia,
-		file:       path.Join(directoryPath, fileName),
+		file:       item,
 	})
 	return nil
 }

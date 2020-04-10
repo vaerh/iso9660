@@ -9,10 +9,9 @@ import (
 // see: https://dev.lovelyhq.com/libburnia/libisofs/raw/master/doc/boot_sectors.txt
 
 type bootCatalogEntry struct {
-	platformId byte   // 0x00=PC 0xEF=UEFI
-	bootMedia  byte   // 0=NoEmul, 2=1.44MB disk, 4=HDD
-	file       string // file path on CD
-	fileData   Item
+	platformId byte // 0x00=PC 0xEF=UEFI
+	bootMedia  byte // 0=NoEmul, 2=1.44MB disk, 4=HDD
+	file       Item
 }
 
 func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
@@ -52,8 +51,7 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 		// sec count depends if we are a uefi file or not (uefi needs file size)
 		if b.platformId == 0xef {
 			// UEFI
-			f := b.fileData
-			siz := f.Size()
+			siz := b.file.Size()
 			sizSec := uint16(siz / 512)
 			if siz%512 != 0 {
 				sizSec += 1
@@ -65,7 +63,7 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 		}
 
 		// load_rba
-		binary.Write(buf, binary.LittleEndian, b.fileData.meta().targetSector) // 4 bytes
+		binary.Write(buf, binary.LittleEndian, b.file.meta().targetSector) // 4 bytes
 
 		buf.Write(make([]byte, 20)) // "Vendor unique selection criteria."
 	}
