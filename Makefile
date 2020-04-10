@@ -14,7 +14,7 @@ build:
 	$(GOROOT)/bin/go build
 
 test:
-	$(GOROOT)/bin/go test ./...
+	$(GOROOT)/bin/go test -v ./...
 
 deps:
 	$(GOROOT)/bin/go get -v -t .

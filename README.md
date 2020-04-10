@@ -3,6 +3,8 @@
 
 A package for reading and creating ISO9660, forked from https://github.com/kdomanski/iso9660.
 
+Requires Go 1.13 or newer.
+
 Joliet and Rock Ridge extensions are not supported.
 
 ## Examples
