@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -34,25 +33,19 @@ type ImageWriter struct {
 	root map[string]interface{}
 }
 
-// NewWriter creates a new ImageWrite and initializes its temporary staging dir.
-// Cleanup should be called after the ImageWriter is no longer needed.
+// NewWriter creates a new ImageWrite.
 func NewWriter() (*ImageWriter, error) {
 	return &ImageWriter{
 		root: make(map[string]interface{}),
 	}, nil
 }
 
-// Cleanup deletes the underlying temporary staging directory of an ImageWriter.
-// It can be called multiple times without issues.
+// Cleanup exists for compatibility. It is not used anymore.
 func (iw *ImageWriter) Cleanup() error {
 	return nil
 }
 
-// AddFile adds a file to the ImageWriter.
-// All path components are mangled to match basic ISO9660 filename requirements.
-func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
-	directoryPath, fileName := manglePath(filePath)
-
+func (iw *ImageWriter) getDir(directoryPath string) (map[string]interface{}, error) {
 	dp := strings.Split(directoryPath, "/")
 	pos := iw.root
 	for _, seg := range dp {
@@ -62,12 +55,25 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 				continue
 			}
 			// trying to create a directory on top of a file → problem
-			return ErrIsDir
+			return nil, ErrIsDir
 		}
 		// not found → add
 		n := make(map[string]interface{})
 		pos[seg] = n
 		pos = n
+	}
+
+	return pos, nil
+}
+
+// AddFile adds a file to the ImageWriter.
+// All path components are mangled to match basic ISO9660 filename requirements.
+func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
+	directoryPath, fileName := manglePath(filePath)
+
+	pos, err := iw.getDir(directoryPath)
+	if err != nil {
+		return err
 	}
 
 	if _, ok := pos[fileName]; ok {
@@ -76,6 +82,31 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 	}
 
 	pos[fileName] = newBuffer(data)
+	return nil
+}
+
+// AddLocalFile adds a file to the ImageWriter from the local filesystem.
+// localPath must be an existing and readable file, and filePath will be the path
+// on the ISO image.
+func (iw *ImageWriter) AddLocalFile(localPath, filePath string) error {
+	buf, err := newFileBuffer(localPath)
+	if err != nil {
+		return fmt.Errorf("unable to add local file: %w", err)
+	}
+
+	directoryPath, fileName := manglePath(filePath)
+
+	pos, err := iw.getDir(directoryPath)
+	if err != nil {
+		return err
+	}
+
+	if _, ok := pos[fileName]; ok {
+		// duplicate
+		return os.ErrExist
+	}
+
+	pos[fileName] = buf
 	return nil
 }
 
@@ -193,7 +224,16 @@ type writeContext struct {
 	wa                io.WriterAt
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
-	itemsToWrite      *list.List // simple fifo
+	itemsToWrite      *list.List     // simple fifo used during
+	items             []*itemToWrite // items in the right order for final write
+}
+
+// allocSectors will allocate a number of sectors and return the first free position
+func (wc *writeContext) allocSectors(count uint32) uint32 {
+	res := wc.freeSectorPointer
+	// no need to use atomic here
+	wc.freeSectorPointer += count
+	return res
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
@@ -202,7 +242,7 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 		return nil, err
 	}
 
-	extentLocation := atomic.AddUint32(&wc.freeSectorPointer, extentLengthInSectors) - extentLengthInSectors
+	extentLocation := wc.allocSectors(extentLengthInSectors)
 	de := &DirectoryEntry{
 		ExtendedAtributeRecordLength: 0,
 		ExtentLocation:               int32(extentLocation),
@@ -222,11 +262,11 @@ type itemToWrite struct {
 	value        interface{} // can be map[string]interface{} or genericBuffer
 	dirPath      string
 	ownEntry     *DirectoryEntry
-	parentEntery *DirectoryEntry
+	parentEntry  *DirectoryEntry
 	targetSector uint32
 }
 
-func (wc *writeContext) processDirectory(dirPath string, dir map[string]interface{}, ownEntry *DirectoryEntry, parentEntery *DirectoryEntry, targetSector uint32) error {
+func (wc *writeContext) processDirectory(dirPath string, dir map[string]interface{}, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
 	var writeOffset uint32
 
 	currentDE := ownEntry.Clone()
@@ -289,7 +329,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			panic("this should not happen")
 		}
 
-		extentLocation := atomic.AddUint32(&wc.freeSectorPointer, extentLengthInSectors) - extentLengthInSectors
+		extentLocation := wc.allocSectors(extentLengthInSectors)
 		de := &DirectoryEntry{
 			ExtendedAtributeRecordLength: 0,
 			ExtentLocation:               int32(extentLocation),
@@ -308,7 +348,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir map[string]interfac
 			value:        c,
 			dirPath:      path.Join(dirPath, name),
 			ownEntry:     de,
-			parentEntery: ownEntry,
+			parentEntry:  ownEntry,
 			targetSector: uint32(de.ExtentLocation),
 		})
 
@@ -378,6 +418,8 @@ func (wc *writeContext) processFile(dirPath string, buf genericBuffer, targetSec
 		bytesLeft -= toRead
 	}
 
+	buf.Close()
+
 	return nil
 }
 
@@ -386,7 +428,7 @@ func (wc *writeContext) writeAll() error {
 		it := item.Value.(itemToWrite)
 		var err error
 		if cV, ok := it.value.(map[string]interface{}); ok {
-			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntery, it.targetSector)
+			err = wc.processDirectory(it.dirPath, cV, it.ownEntry, it.parentEntry, it.targetSector)
 		} else if cV, ok := it.value.(genericBuffer); ok {
 			err = wc.processFile(it.dirPath, cV, it.targetSector)
 		} else {
@@ -433,7 +475,7 @@ func (iw *ImageWriter) WriteTo(wa io.WriterAt, volumeIdentifier string) error {
 		value:        wc.root,
 		dirPath:      "",
 		ownEntry:     rootDE,
-		parentEntery: rootDE,
+		parentEntry:  rootDE,
 		targetSector: uint32(rootDE.ExtentLocation),
 	})
 

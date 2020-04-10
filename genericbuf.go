@@ -9,6 +9,7 @@ import (
 type genericBuffer interface {
 	io.Reader
 	Size() int64
+	Close() error
 }
 
 // fileHandler returns a generic interface for various kind of files or buffers
@@ -28,6 +29,18 @@ func newBuffer(in io.Reader) genericBuffer {
 	}
 }
 
+func newFileBuffer(filename string) (genericBuffer, error) {
+	st, err := os.Stat(filename)
+	if err != nil {
+		return nil, err
+	}
+	if st.IsDir() {
+		return nil, ErrIsDir
+	}
+
+	return &filepathHndlr{path: filename, st: st}, nil
+}
+
 type fileHndlr struct {
 	*os.File
 }
@@ -42,10 +55,49 @@ func (f *fileHndlr) Size() int64 {
 	return st.Size()
 }
 
+func (f *fileHndlr) Close() error {
+	// not our file, so not closing it
+	return nil
+}
+
 type bufHndlr struct {
 	*bytes.Reader
 }
 
 func (b *bufHndlr) Size() int64 {
 	return int64(b.Reader.Len())
+}
+
+func (b *bufHndlr) Close() error {
+	return nil
+}
+
+type filepathHndlr struct {
+	path string
+	st   os.FileInfo
+	f    *os.File
+}
+
+func (f *filepathHndlr) Read(p []byte) (int, error) {
+	if f.f == nil {
+		var err error
+		f.f, err = os.Open(f.path)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return f.f.Read(p)
+}
+
+func (f *filepathHndlr) Size() int64 {
+	return f.st.Size()
+}
+
+func (f *filepathHndlr) Close() error {
+	if f.f == nil {
+		return nil
+	}
+	err := f.f.Close()
+	f.f = nil
+	return err
 }
