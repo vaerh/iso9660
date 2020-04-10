@@ -1,7 +1,6 @@
 package iso9660
 
 import (
-	"bytes"
 	"container/list"
 	"encoding/binary"
 	"errors"
@@ -35,10 +34,9 @@ type ImageWriter struct {
 	Primary *PrimaryVolumeDescriptorBody
 	Catalog string // Catalog is the path of the boot catalog on disk. Defaults to "BOOT.CAT"
 
-	root        *itemDir
-	vd          []*volumeDescriptor
-	boot        []*bootCatalogEntry // boot entries
-	lookupTable map[string]Item     // allows quick lookup of any given item
+	root *itemDir
+	vd   []*volumeDescriptor
+	boot []*bootCatalogEntry // boot entries
 }
 
 // NewWriter creates a new ImageWrite.
@@ -73,10 +71,9 @@ func NewWriter() (*ImageWriter, error) {
 	}
 
 	return &ImageWriter{
-		root:        newDir(),
-		Primary:     Primary,
-		Catalog:     "BOOT.CAT",
-		lookupTable: make(map[string]Item),
+		root:    newDir(),
+		Primary: Primary,
+		Catalog: "BOOT.CAT",
 		vd: []*volumeDescriptor{
 			{
 				Header: volumeDescriptorHeader{
@@ -90,7 +87,7 @@ func NewWriter() (*ImageWriter, error) {
 	}, nil
 }
 
-func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath string, data Item) error {
+func (iw *ImageWriter) AddBootEntry(platformId, bootMedia byte, bootInfoTable bool, filePath string, data Item) error {
 	directoryPath, fileName := manglePath(filePath)
 
 	pos, err := iw.getDir(directoryPath)
@@ -108,16 +105,24 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 		return err
 	}
 
+	if bootInfoTable {
+		// we need to be able to modify this file, grab it and store it into memory
+		item, err = bufferizeItem(item)
+		if err != nil {
+			return err
+		}
+	}
+
 	dirPath := path.Join(directoryPath, fileName)
 	item.meta().dirPath = dirPath
-	iw.lookupTable[dirPath] = item
 	pos.children[fileName] = item
 
 	// add boot record
 	iw.boot = append(iw.boot, &bootCatalogEntry{
-		platformId: platformId,
-		bootMedia:  bootMedia,
-		file:       item,
+		platformId:    platformId,
+		bootMedia:     bootMedia,
+		bootInfoTable: bootInfoTable,
+		file:          item,
 	})
 	return nil
 }
@@ -165,7 +170,6 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 
 	dirPath := path.Join(directoryPath, fileName)
 	item.meta().dirPath = dirPath
-	iw.lookupTable[dirPath] = item
 	pos.children[fileName] = item
 	return nil
 }
@@ -449,17 +453,21 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	var (
 		err error
 		// variables used for boot
-		boot    *BootVolumeDescriptorBody
-		bootCat []byte
+		boot        *BootVolumeDescriptorBody
+		bootCat     []byte
+		bootCatInfo Item
 	)
 
 	if len(iw.boot) > 0 {
 		// we need a boot catalog, store info
-		boot = &BootVolumeDescriptorBody{}
+		boot = &BootVolumeDescriptorBody{
+			BootSystemIdentifier: "EL TORITO SPECIFICATION",
+		}
 		bootCat = make([]byte, 2048)
+		bootCatInfo = &bufferHndlr{d: bootCat}
 
 		// add boot catalog
-		err = iw.AddFile(&bufHndlr{Reader: bytes.NewReader(bootCat)}, iw.Catalog)
+		err = iw.AddFile(bootCatInfo, iw.Catalog)
 		if err != nil {
 			return err
 		}
@@ -504,7 +512,6 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	if len(iw.boot) > 0 {
 		// we have a boot catalog to make!
 		// First, grab the location of boot catalog
-		bootCatInfo := wc.iw.lookupTable[iw.Catalog]
 		binary.LittleEndian.PutUint32(boot.BootSystemUse[:4], bootCatInfo.meta().targetSector)
 
 		// generate catalog

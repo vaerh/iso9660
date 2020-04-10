@@ -9,9 +9,10 @@ import (
 // see: https://dev.lovelyhq.com/libburnia/libisofs/raw/master/doc/boot_sectors.txt
 
 type bootCatalogEntry struct {
-	platformId byte // 0x00=PC 0xEF=UEFI
-	bootMedia  byte // 0=NoEmul, 2=1.44MB disk, 4=HDD
-	file       Item
+	platformId    byte // 0x00=PC 0xEF=UEFI
+	bootMedia     byte // 0=NoEmul, 2=1.44MB disk, 4=HDD
+	bootInfoTable bool
+	file          Item
 }
 
 // encodeBootCatalogs must be called after prepareAll so that targetSector is
@@ -68,6 +69,10 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 		binary.Write(buf, binary.LittleEndian, b.file.meta().targetSector) // 4 bytes
 
 		buf.Write(make([]byte, 20)) // "Vendor unique selection criteria."
+
+		if b.bootInfoTable {
+			b.performInfoTable()
+		}
 	}
 	return buf.Bytes(), nil
 }
@@ -80,4 +85,16 @@ func doBootCatalogChecksum(b []byte) []byte {
 	}
 
 	return []byte{byte(v >> 8), byte(v & 0xff)}
+}
+
+func (b *bootCatalogEntry) performInfoTable() {
+	// alter file in b.file (a *bufferHndlr) to include boot info table insertion
+	// see: man mkisofs under EL TORITO BOOT INFORMATION TABLE
+	f := b.file.(*bufferHndlr)
+	binary.LittleEndian.PutUint32(f.d[8:12], 16)                     // LBA of primary volume descriptor (always 16)
+	binary.LittleEndian.PutUint32(f.d[12:16], f.meta().targetSector) // LBA of boot file
+	binary.LittleEndian.PutUint32(f.d[16:20], uint32(f.Size()))      // Boot file length in bytes
+	// TODO 32-bit checksum →
+	// The 32-bit checksum is the sum of all the 32-bit words in the boot file starting at byte offset 64.
+	// ???
 }

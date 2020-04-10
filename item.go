@@ -23,9 +23,9 @@ func NewItemReader(r io.Reader) (Item, error) {
 	case *os.File:
 		return &fileHndlr{File: v}, nil
 	case *bytes.Reader:
-		return &bufHndlr{Reader: v}, nil
+		return &readerHndlr{Reader: v}, nil
 	case *bytes.Buffer:
-		return &bufHndlr{Reader: bytes.NewReader(v.Bytes())}, nil
+		return &readerHndlr{Reader: bytes.NewReader(v.Bytes())}, nil
 	default:
 		buf := &bytes.Buffer{}
 		_, err := io.Copy(buf, r)
@@ -33,8 +33,17 @@ func NewItemReader(r io.Reader) (Item, error) {
 			return nil, err
 		}
 		r := bytes.NewReader(buf.Bytes())
-		return &bufHndlr{Reader: r}, nil
+		return &readerHndlr{Reader: r}, nil
 	}
+}
+
+func bufferizeItem(r io.Reader) (Item, error) {
+	buf := &bytes.Buffer{}
+	_, err := io.Copy(buf, r)
+	if err != nil {
+		return nil, err
+	}
+	return &bufferHndlr{d: buf.Bytes()}, nil
 }
 
 func NewItemFile(filename string) (Item, error) {
@@ -49,6 +58,7 @@ func NewItemFile(filename string) (Item, error) {
 	return &filepathHndlr{path: filename, st: st}, nil
 }
 
+// fileHndlr: handles an existing open file
 type fileHndlr struct {
 	*os.File
 	m itemMeta
@@ -81,16 +91,17 @@ func (f *fileHndlr) meta() *itemMeta {
 	return &f.m
 }
 
-type bufHndlr struct {
+// readerHndlr: handles a bytes.Reader
+type readerHndlr struct {
 	*bytes.Reader
 	m itemMeta
 }
 
-func (b *bufHndlr) Size() int64 {
+func (b *readerHndlr) Size() int64 {
 	return int64(b.Reader.Len())
 }
 
-func (b *bufHndlr) sectors() uint32 {
+func (b *readerHndlr) sectors() uint32 {
 	siz := b.Size()
 	if siz%int64(sectorSize) == 0 {
 		return uint32(siz / int64(sectorSize))
@@ -98,14 +109,52 @@ func (b *bufHndlr) sectors() uint32 {
 	return uint32(siz/int64(sectorSize)) + 1
 }
 
-func (b *bufHndlr) Close() error {
+func (b *readerHndlr) Close() error {
 	return nil
 }
 
-func (b *bufHndlr) meta() *itemMeta {
+func (b *readerHndlr) meta() *itemMeta {
 	return &b.m
 }
 
+// bufferHndlr: handle a []byte array
+type bufferHndlr struct {
+	d []byte
+	r *bytes.Reader
+	m itemMeta
+}
+
+func (b *bufferHndlr) Size() int64 {
+	return int64(len(b.d))
+}
+
+func (b *bufferHndlr) sectors() uint32 {
+	siz := b.Size()
+	if siz%int64(sectorSize) == 0 {
+		return uint32(siz / int64(sectorSize))
+	}
+	return uint32(siz/int64(sectorSize)) + 1
+}
+
+func (b *bufferHndlr) Read(p []byte) (int, error) {
+	if b.r == nil {
+		b.r = bytes.NewReader(b.d)
+	}
+	return b.r.Read(p)
+}
+
+func (b *bufferHndlr) Close() error {
+	if b.r != nil {
+		b.r = nil
+	}
+	return nil
+}
+
+func (b *bufferHndlr) meta() *itemMeta {
+	return &b.m
+}
+
+// filepathHandlr: handle a file by path
 type filepathHndlr struct {
 	path string
 	st   os.FileInfo
