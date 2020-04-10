@@ -32,11 +32,13 @@ var (
 // ImageWriter is responsible for staging an image's contents
 // and writing them to an image.
 type ImageWriter struct {
-	root    *itemDir
 	Primary *PrimaryVolumeDescriptorBody
 	Catalog string // Catalog is the path of the boot catalog on disk. Defaults to "BOOT.CAT"
-	vd      []*volumeDescriptor
-	boot    []*bootCatalogEntry // boot entries
+
+	root        *itemDir
+	vd          []*volumeDescriptor
+	boot        []*bootCatalogEntry // boot entries
+	lookupTable map[string]Item     // allows quick lookup of any given item
 }
 
 // NewWriter creates a new ImageWrite.
@@ -71,9 +73,10 @@ func NewWriter() (*ImageWriter, error) {
 	}
 
 	return &ImageWriter{
-		root:    newDir(),
-		Primary: Primary,
-		Catalog: "BOOT.CAT",
+		root:        newDir(),
+		Primary:     Primary,
+		Catalog:     "BOOT.CAT",
+		lookupTable: make(map[string]Item),
 		vd: []*volumeDescriptor{
 			{
 				Header: volumeDescriptorHeader{
@@ -105,6 +108,9 @@ func (iw *ImageWriter) AddBootEntry(platformId byte, bootMedia byte, filePath st
 		return err
 	}
 
+	dirPath := path.Join(directoryPath, fileName)
+	item.meta().dirPath = dirPath
+	iw.lookupTable[dirPath] = item
 	pos.children[fileName] = item
 
 	// add boot record
@@ -157,6 +163,9 @@ func (iw *ImageWriter) AddFile(data io.Reader, filePath string) error {
 		return err
 	}
 
+	dirPath := path.Join(directoryPath, fileName)
+	item.meta().dirPath = dirPath
+	iw.lookupTable[dirPath] = item
 	pos.children[fileName] = item
 	return nil
 }
@@ -194,9 +203,8 @@ type writeContext struct {
 	w                 io.Writer
 	timestamp         RecordingTimestamp
 	freeSectorPointer uint32
-	itemsToWrite      *list.List      // simple fifo used during
-	items             []Item          // items in the right order for final write
-	lookupTable       map[string]Item // allows quick lookup of any given item
+	itemsToWrite      *list.List // simple fifo used during
+	items             []Item     // items in the right order for final write
 	writeSecPos       uint32
 	emptySector       []byte // a sector-sized buffer of zeroes
 }
@@ -228,7 +236,7 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 	return de, nil
 }
 
-func (wc *writeContext) processDirectory(dirPath string, dir *itemDir, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
+func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
 	buf := &bytes.Buffer{}
 
 	currentDE := ownEntry.Clone()
@@ -300,13 +308,10 @@ func (wc *writeContext) processDirectory(dirPath string, dir *itemDir, ownEntry 
 			SystemUse:                    []byte{},
 		}
 
-		dirPath := path.Join(dirPath, name)
-
-		c.meta().set(dirPath, de, ownEntry, uint32(de.ExtentLocation))
+		c.meta().set(de, ownEntry, uint32(de.ExtentLocation))
 
 		// queue this child for processing
 		wc.itemsToWrite.PushBack(c)
-		wc.lookupTable[dirPath] = c
 
 		data, err := de.MarshalBinary()
 		if err != nil {
@@ -341,7 +346,7 @@ func (wc *writeContext) processDirectory(dirPath string, dir *itemDir, ownEntry 
 	return nil
 }
 
-func (wc *writeContext) processFile(dirPath string, buf Item, targetSector uint32) error {
+func (wc *writeContext) processFile(buf Item, targetSector uint32) error {
 	if buf.Size() > int64(math.MaxUint32) {
 		return ErrFileTooLarge
 	}
@@ -371,9 +376,9 @@ func (wc *writeContext) processAll() error {
 		it := item.Value.(Item)
 		var err error
 		if cV, ok := it.(*itemDir); ok {
-			err = wc.processDirectory(it.meta().dirPath, cV, it.meta().ownEntry, it.meta().parentEntry, it.meta().targetSector)
+			err = wc.processDirectory(cV, it.meta().ownEntry, it.meta().parentEntry, it.meta().targetSector)
 		} else {
-			err = wc.processFile(it.meta().dirPath, it, it.meta().targetSector)
+			err = wc.processFile(it, it.meta().targetSector)
 		}
 
 		if err != nil {
@@ -486,7 +491,6 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		itemsToWrite:      list.New(),
 		writeSecPos:       0,
 		emptySector:       make([]byte, sectorSize),
-		lookupTable:       make(map[string]Item),
 	}
 
 	// configure volume space size
@@ -500,7 +504,7 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	if len(iw.boot) > 0 {
 		// we have a boot catalog to make!
 		// First, grab the location of boot catalog
-		bootCatInfo := wc.lookupTable[iw.Catalog]
+		bootCatInfo := wc.iw.lookupTable[iw.Catalog]
 		binary.LittleEndian.PutUint32(boot.BootSystemUse[:4], bootCatInfo.meta().targetSector)
 
 		// then for each file...
