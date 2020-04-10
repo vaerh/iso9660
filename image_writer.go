@@ -237,7 +237,8 @@ func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 }
 
 func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry, parentEntry *DirectoryEntry, targetSector uint32) error {
-	buf := &bytes.Buffer{}
+	buf := dir.buf
+	bufPos := 0
 
 	currentDE := ownEntry.Clone()
 	currentDE.Identifier = string([]byte{0})
@@ -253,14 +254,17 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 		return err
 	}
 
-	_, err = buf.Write(currentDEData)
+	n, err := buf.Write(currentDEData)
 	if err != nil {
 		return err
 	}
-	_, err = buf.Write(parentDEData)
+	bufPos += n
+
+	n, err = buf.Write(parentDEData)
 	if err != nil {
 		return err
 	}
+	bufPos += n
 
 	// here we need to proceed in alphabetical order so tests aren't broken
 	names := make([]string, 0, len(dir.children))
@@ -318,14 +322,13 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 			return err
 		}
 
-		if uint32(buf.Len()+len(data)) > sectorSize {
+		if uint32(bufPos+len(data)) > sectorSize {
 			// unless we reached the exact end of the sector
-			item, err := NewItemReader(buf)
-			if err != nil {
-				return err
+			if uint32(bufPos) < sectorSize {
+				// need to add some bytes
+				buf.Write(wc.emptySector[:sectorSize-uint32(bufPos)])
 			}
-			wc.items = append(wc.items, item)
-			buf = &bytes.Buffer{} // do not use buf.Reset() to ensure we have a new memory area
+			bufPos = 0
 		}
 
 		_, err = buf.Write(data)
@@ -335,13 +338,7 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 	}
 
 	// unless we reached the exact end of the sector
-	if buf.Len() > 0 {
-		item, err := NewItemReader(buf)
-		if err != nil {
-			return err
-		}
-		wc.items = append(wc.items, item)
-	}
+	wc.items = append(wc.items, dir)
 
 	return nil
 }

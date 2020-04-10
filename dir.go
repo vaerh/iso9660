@@ -1,20 +1,23 @@
 package iso9660
 
+import "bytes"
+
 type itemDir struct {
 	children map[string]Item
+	buf      *bytes.Buffer
 	m        itemMeta
 }
 
 func newDir() *itemDir {
 	res := &itemDir{
 		children: make(map[string]Item),
+		buf:      &bytes.Buffer{},
 	}
 	return res
 }
 
 func (d *itemDir) Read(p []byte) (int, error) {
-	// TODO
-	return 0, nil
+	return d.buf.Read(p)
 }
 
 func (d *itemDir) sectors() uint32 {
