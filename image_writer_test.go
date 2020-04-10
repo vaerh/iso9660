@@ -68,7 +68,6 @@ TODO: re-enable test
 func TestWriterStaging(t *testing.T) {
 	w, err := NewWriter()
 	assert.NoError(t, err)
-	defer w.Cleanup() // nolint: errcheck
 
 	testFileContents := "hrh2309hr320h"
 	testFilePath := "FarTooLongFilePathThatWillBeTrimmed/dirø1/somefile.dat"
@@ -88,7 +87,6 @@ func TestWriterStaging(t *testing.T) {
 func TestWriter(t *testing.T) {
 	w, err := NewWriter()
 	assert.NoError(t, err)
-	defer w.Cleanup() // nolint: errcheck
 
 	err = w.AddFile(strings.NewReader("hrh2309hr320h"), "someDirectoryPath/dir1/somefile.dat")
 	assert.NoError(t, err)

@@ -50,7 +50,6 @@ func main() {
   if err != nil {
     log.Fatalf("failed to create writer: %s", err)
   }
-  defer writer.Cleanup()
 
   // set volume name
   writer.Primary.VolumeIdentifier = "testvol"

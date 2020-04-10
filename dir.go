@@ -2,6 +2,7 @@ package iso9660
 
 type itemDir struct {
 	children map[string]Item
+	m        itemMeta
 }
 
 func newDir() *itemDir {
@@ -46,4 +47,8 @@ func (d *itemDir) Size() int64 {
 
 func (d *itemDir) Close() error {
 	return nil
+}
+
+func (d *itemDir) meta() *itemMeta {
+	return &d.m
 }
