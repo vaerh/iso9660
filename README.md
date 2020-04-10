@@ -52,13 +52,10 @@ func main() {
   }
   defer writer.Cleanup()
 
-  f, err := os.Open("/home/user/myFile.txt")
-  if err != nil {
-    log.Fatalf("failed to open file: %s", err)
-  }
-  defer f.Close()
+  // set volume name
+  writer.Primary.VolumeIdentifier = "testvol"
 
-  err = writer.AddFile(f, "folder/MYFILE.TXT")
+  err = writer.AddLocalFile("/home/user/myFile.txt", "folder/MYFILE.TXT")
   if err != nil {
     log.Fatalf("failed to add file: %s", err)
   }
@@ -68,7 +65,7 @@ func main() {
     log.Fatalf("failed to create file: %s", err)
   }
 
-  err = writer.WriteTo(outputFile, "testvol")
+  err = writer.WriteTo(outputFile)
   if err != nil {
     log.Fatalf("failed to write ISO image: %s", err)
   }
