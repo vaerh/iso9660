@@ -66,7 +66,7 @@ func encodeBootCatalogs(e []*BootCatalogEntry) ([]byte, error) {
 		}
 
 		// load_rba
-		binary.Write(buf, binary.LittleEndian, b.file.meta().targetSector) // 4 bytes
+		binary.Write(buf, binary.LittleEndian, uint32(b.file.meta().targetSector)) // 4 bytes
 
 		buf.Write(make([]byte, 20)) // "Vendor unique selection criteria."
 
@@ -81,10 +81,12 @@ func doBootCatalogChecksum(b []byte) []byte {
 	var v uint16
 
 	for i := 0; i < len(b); i += 2 {
-		v += uint16((b[i] << 8) | b[i+1])
+		v -= binary.LittleEndian.Uint16(b[i : i+2])
 	}
 
-	return []byte{byte(v >> 8), byte(v & 0xff)}
+	res := make([]byte, 2)
+	binary.LittleEndian.PutUint16(res, v)
+	return res
 }
 
 func doElToritoTableChecksum(in []byte) (r uint32) {

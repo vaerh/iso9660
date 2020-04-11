@@ -132,6 +132,9 @@ func (iw *ImageWriter) getDir(directoryPath string) (*itemDir, error) {
 	dp := strings.Split(directoryPath, "/")
 	pos := iw.root
 	for _, seg := range dp {
+		if seg == "" {
+			continue
+		}
 		if v, ok := pos.children[seg]; ok {
 			if rV, ok := v.(*itemDir); ok {
 				pos = rV
