@@ -75,3 +75,39 @@ func main() {
   }
 }
 ```
+
+### Streaming an ISO via HTTP
+
+It is possible to stream a dynamically generated file on request via HTTP in order to include files or customize configuration files:
+
+```go
+import (
+  "http"
+
+  "github.com/KarpelesLab/iso9660"
+)
+
+func ServeHTTP(rw http.RequestWriter, req *http.Request) {
+  writer, err := iso9660.NewWriter()
+  if err != nil {
+    log.Fatalf("failed to create writer: %s", err)
+  }
+
+  // set volume name
+  writer.Primary.VolumeIdentifier = "LIVE IMAGE"
+
+  if syslinux, err := iso9660.NewItemFile("/pkg/main/sys-boot.syslinux.core/share/syslinux/isolinux.bin"); err == nil {
+    writer.AddBootEntry(&iso9660.BootCatalogEntry{BootInfoTable: true}, isolinux, "isolinux/isolinux.bin")
+    writer.AddLocalFile("/pkg/main/sys-boot.syslinux.core/share/syslinux/linux.c32", "isolinux/linux.c32")
+    writer.AddLocalFile("/pkg/main/sys-boot.syslinux.core/share/syslinux/ldlinux.c32", "isolinux/ldlinux.c32")
+  }
+
+  writer.AddLocalFile("kernel.img", "isolinux/kernel.img")
+  writer.AddLocalFile("initrd.img", "isolinux/initrd.img")
+  writer.AddLocalFile("root.squashfs", "root.img")
+  writer.AddFile(getSyslinuxConfig(), "isolinux/isolinux.cfg")
+
+  rw.Header().Set("Content-Type", "application/x-iso9660-image")
+  writer.WriteTo(rw)
+}
+```
