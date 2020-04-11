@@ -198,6 +198,8 @@ func (f *filepathHndlr) meta() *itemMeta {
 	return &f.m
 }
 
+// NewItemConcat returns a single Item object actually representing multiple
+// items being concatenated.
 func NewItemConcat(items ...Item) Item {
 	return &itemConcat{items: items}
 }
@@ -222,7 +224,7 @@ func (i *itemConcat) Close() error {
 
 func (i *itemConcat) Read(p []byte) (int, error) {
 	for {
-		if len(i.items) >= i.pos {
+		if i.pos >= len(i.items) {
 			return 0, io.EOF
 		}
 
@@ -230,6 +232,10 @@ func (i *itemConcat) Read(p []byte) (int, error) {
 		n, err := item.Read(p)
 		if err == io.EOF {
 			i.pos += 1
+			if n > 0 {
+				// this shouldn't happen
+				return n, nil
+			}
 			continue
 		}
 		return n, err
