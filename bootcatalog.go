@@ -87,14 +87,27 @@ func doBootCatalogChecksum(b []byte) []byte {
 	return []byte{byte(v >> 8), byte(v & 0xff)}
 }
 
+func doElToritoTableChecksum(in []byte) (r uint32) {
+	var i int
+	for i < len(in)-4 {
+		r += binary.LittleEndian.Uint32(in[i : i+4])
+		i += 4
+	}
+	if i != len(in) {
+		// file length not multiple of 4
+		buf := make([]byte, 4)
+		copy(buf, in[i:])
+		r += binary.LittleEndian.Uint32(buf)
+	}
+	return
+}
+
 func (b *BootCatalogEntry) performInfoTable() {
 	// alter file in b.file (a *bufferHndlr) to include boot info table insertion
 	// see: man mkisofs under EL TORITO BOOT INFORMATION TABLE
 	f := b.file.(*bufferHndlr)
-	binary.LittleEndian.PutUint32(f.d[8:12], 16)                     // LBA of primary volume descriptor (always 16)
-	binary.LittleEndian.PutUint32(f.d[12:16], f.meta().targetSector) // LBA of boot file
-	binary.LittleEndian.PutUint32(f.d[16:20], uint32(f.Size()))      // Boot file length in bytes
-	// TODO 32-bit checksum →
-	// The 32-bit checksum is the sum of all the 32-bit words in the boot file starting at byte offset 64.
-	// ???
+	binary.LittleEndian.PutUint32(f.d[8:12], 16)                                 // LBA of primary volume descriptor (always 16)
+	binary.LittleEndian.PutUint32(f.d[12:16], f.meta().targetSector)             // LBA of boot file
+	binary.LittleEndian.PutUint32(f.d[16:20], uint32(f.Size()))                  // Boot file length in bytes
+	binary.LittleEndian.PutUint32(f.d[20:24], doElToritoTableChecksum(f.d[64:])) // 32bit checksum
 }
