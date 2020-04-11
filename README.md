@@ -83,6 +83,7 @@ It is possible to stream a dynamically generated file on request via HTTP in ord
 ```go
 import (
   "http"
+  "log"
 
   "github.com/KarpelesLab/iso9660"
 )
