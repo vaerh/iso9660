@@ -214,17 +214,19 @@ type writeContext struct {
 }
 
 // allocSectors will allocate a number of sectors and return the first free position
-func (wc *writeContext) allocSectors(count uint32) uint32 {
+func (wc *writeContext) allocSectors(it Item) uint32 {
 	res := wc.freeSectorPointer
-	// no need to use atomic here
-	wc.freeSectorPointer += count
+	wc.freeSectorPointer += it.sectors()
+	wc.items = append(wc.items, it) // items are stored in allocated order
+
+	it.meta().targetSector = res
 	return res
 }
 
 func (wc *writeContext) createDEForRoot() (*DirectoryEntry, error) {
 	extentLengthInSectors := wc.iw.root.sectors()
 
-	extentLocation := wc.allocSectors(extentLengthInSectors)
+	extentLocation := wc.allocSectors(wc.iw.root)
 	de := &DirectoryEntry{
 		ExtendedAtributeRecordLength: 0,
 		ExtentLocation:               int32(extentLocation),
@@ -281,30 +283,26 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 		c := dir.children[name]
 
 		var (
-			fileFlags             byte
-			extentLengthInSectors uint32
-			extentLength          uint32
+			fileFlags    byte
+			extentLength uint32
 		)
 
 		var de *DirectoryEntry
+		if c.Size() > int64(math.MaxUint32) {
+			return ErrFileTooLarge
+		}
+		extentLength = uint32(c.Size())
 
-		if cV, ok := c.(*itemDir); ok {
-			extentLengthInSectors = cV.sectors()
+		if _, ok := c.(*itemDir); ok {
+			// this is a directory
 			fileFlags = dirFlagDir
-			extentLength = extentLengthInSectors * sectorSize
 		} else {
-			if c.Size() > int64(math.MaxUint32) {
-				return ErrFileTooLarge
-			}
-			extentLength = uint32(c.Size())
-			extentLengthInSectors = c.sectors()
-			de = c.meta().ownEntry
-
+			de = c.meta().ownEntry // grab de in case file was already included in disk
 			fileFlags = 0
 		}
 
 		if de == nil {
-			extentLocation := wc.allocSectors(extentLengthInSectors)
+			extentLocation := wc.allocSectors(c)
 			de = &DirectoryEntry{
 				ExtendedAtributeRecordLength: 0,
 				ExtentLocation:               int32(extentLocation),
@@ -318,10 +316,12 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 				SystemUse:                    []byte{},
 			}
 
-			c.meta().set(de, ownEntry, uint32(de.ExtentLocation))
+			c.meta().set(de, ownEntry)
 
-			// queue this child for processing
-			wc.itemsToWrite.PushBack(c)
+			// queue this child for processing if directory
+			if fileFlags == dirFlagDir {
+				wc.itemsToWrite.PushBack(c)
+			}
 		}
 
 		data, err := de.MarshalBinary()
@@ -344,19 +344,6 @@ func (wc *writeContext) processDirectory(dir *itemDir, ownEntry *DirectoryEntry,
 		}
 	}
 
-	// unless we reached the exact end of the sector
-	wc.items = append(wc.items, dir)
-
-	return nil
-}
-
-func (wc *writeContext) processFile(buf Item, targetSector uint32) error {
-	if buf.Size() > int64(math.MaxUint32) {
-		return ErrFileTooLarge
-	}
-
-	wc.items = append(wc.items, buf)
-
 	return nil
 }
 
@@ -369,9 +356,7 @@ func (wc *writeContext) processAll() error {
 
 	// store rootDE pointer in primary
 	wc.iw.Primary.RootDirectoryEntry = rootDE
-	wc.iw.root.meta().ownEntry = rootDE
-	wc.iw.root.meta().parentEntry = rootDE
-	wc.iw.root.meta().targetSector = uint32(rootDE.ExtentLocation)
+	wc.iw.root.meta().set(rootDE, rootDE)
 
 	// Write disk data
 	wc.itemsToWrite.PushBack(wc.iw.root)
@@ -381,12 +366,10 @@ func (wc *writeContext) processAll() error {
 		var err error
 		if cV, ok := it.(*itemDir); ok {
 			err = wc.processDirectory(cV, it.meta().ownEntry, it.meta().parentEntry, it.meta().targetSector)
-		} else {
-			err = wc.processFile(it, it.meta().targetSector)
-		}
 
-		if err != nil {
-			return fmt.Errorf("processing %s: %s", it.meta().dirPath, err)
+			if err != nil {
+				return fmt.Errorf("processing %s: %s", it.meta().dirPath, err)
+			}
 		}
 
 		wc.itemsToWrite.Remove(item)

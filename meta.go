@@ -7,8 +7,7 @@ type itemMeta struct {
 	targetSector uint32
 }
 
-func (i *itemMeta) set(own, parent *DirectoryEntry, targetSector uint32) {
+func (i *itemMeta) set(own, parent *DirectoryEntry) {
 	i.ownEntry = own
 	i.parentEntry = parent
-	i.targetSector = targetSector
 }
