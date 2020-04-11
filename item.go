@@ -197,3 +197,62 @@ func (f *filepathHndlr) Close() error {
 func (f *filepathHndlr) meta() *itemMeta {
 	return &f.m
 }
+
+func NewItemConcat(items ...Item) Item {
+	return &itemConcat{items: items}
+}
+
+type itemConcat struct {
+	items []Item
+	pos   int
+	m     itemMeta
+}
+
+func (i *itemConcat) Close() error {
+	// call close on all items
+	var err error
+	for _, item := range i.items {
+		err = item.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *itemConcat) Read(p []byte) (int, error) {
+	for {
+		if len(i.items) >= i.pos {
+			return 0, io.EOF
+		}
+
+		item := i.items[i.pos]
+		n, err := item.Read(p)
+		if err == io.EOF {
+			i.pos += 1
+			continue
+		}
+		return n, err
+	}
+}
+
+func (i *itemConcat) Size() int64 {
+	var siz int64
+
+	for _, item := range i.items {
+		siz += item.Size()
+	}
+	return siz
+}
+
+func (i *itemConcat) meta() *itemMeta {
+	return &i.m
+}
+
+func (i *itemConcat) sectors() uint32 {
+	siz := i.Size()
+	if siz%int64(sectorSize) == 0 {
+		return uint32(siz / int64(sectorSize))
+	}
+	return uint32(siz/int64(sectorSize)) + 1
+}
