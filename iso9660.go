@@ -366,10 +366,21 @@ func (pvd PrimaryVolumeDescriptorBody) MarshalBinary() ([]byte, error) {
 	return output, nil
 }
 
+// MarshalBinary encodes a BootVolumeDescriptorBody into binary form
+func (bvd *BootVolumeDescriptorBody) MarshalBinary() ([]byte, error) {
+	output := make([]byte, sectorSize)
+
+	copy(output[7:39], bvd.BootSystemIdentifier)
+	copy(output[39:71], bvd.BootIdentifier)
+	copy(output[71:], bvd.BootSystemUse[:])
+
+	return output, nil
+}
+
 // UnmarshalBinary decodes a BootVolumeDescriptorBody from binary form
 func (bvd *BootVolumeDescriptorBody) UnmarshalBinary(data []byte) error {
-	bvd.BootSystemIdentifier = strings.TrimRight(string(data[7:39]), " ")
-	bvd.BootIdentifier = strings.TrimRight(string(data[39:71]), " ")
+	bvd.BootSystemIdentifier = strings.TrimRight(string(data[7:39]), " \x00")
+	bvd.BootIdentifier = strings.TrimRight(string(data[39:71]), " \x00")
 	if n := copy(bvd.BootSystemUse[:], data[71:2048]); n != 1977 {
 		return fmt.Errorf("BootVolumeDescriptorBody.UnmarshalBinary: copied %d bytes", n)
 	}
@@ -426,7 +437,9 @@ func (vd volumeDescriptor) MarshalBinary() ([]byte, error) {
 
 	switch vd.Header.Type {
 	case volumeTypeBoot:
-		return nil, errors.New("boot volumes are not yet supported")
+		if output, err = vd.Boot.MarshalBinary(); err != nil {
+			return nil, err
+		}
 	case volumeTypePartition:
 		return nil, errors.New("partition volumes are not yet supported")
 	case volumeTypePrimary, volumeTypeSupplementary:
