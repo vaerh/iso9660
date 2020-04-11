@@ -36,7 +36,7 @@ type ImageWriter struct {
 
 	root *itemDir
 	vd   []*volumeDescriptor
-	boot []*bootCatalogEntry // boot entries
+	boot []*BootCatalogEntry // boot entries
 }
 
 // NewWriter creates a new ImageWrite.
@@ -87,7 +87,7 @@ func NewWriter() (*ImageWriter, error) {
 	}, nil
 }
 
-func (iw *ImageWriter) AddBootEntry(platformId, bootMedia byte, bootInfoTable bool, filePath string, data Item) error {
+func (iw *ImageWriter) AddBootEntry(boot *BootCatalogEntry, data Item, filePath string) error {
 	directoryPath, fileName := manglePath(filePath)
 
 	pos, err := iw.getDir(directoryPath)
@@ -105,7 +105,7 @@ func (iw *ImageWriter) AddBootEntry(platformId, bootMedia byte, bootInfoTable bo
 		return err
 	}
 
-	if bootInfoTable {
+	if boot.BootInfoTable {
 		// we need to be able to modify this file, grab it and store it into memory
 		item, err = bufferizeItem(item)
 		if err != nil {
@@ -117,13 +117,10 @@ func (iw *ImageWriter) AddBootEntry(platformId, bootMedia byte, bootInfoTable bo
 	item.meta().dirPath = dirPath
 	pos.children[fileName] = item
 
+	boot.file = item
+
 	// add boot record
-	iw.boot = append(iw.boot, &bootCatalogEntry{
-		platformId:    platformId,
-		bootMedia:     bootMedia,
-		bootInfoTable: bootInfoTable,
-		file:          item,
-	})
+	iw.boot = append(iw.boot, boot)
 	return nil
 }
 
@@ -404,7 +401,8 @@ func (wc *writeContext) writeSector(buffer []byte, sector uint32) error {
 	return nil
 }
 
-// writeSectorBuf will copy the given buffer to the image
+// writeSectorBuf will copy the given buffer to the image, after checking its
+// position is accurate.
 func (wc *writeContext) writeSectorBuf(buf Item) error {
 	if buf.meta().targetSector != wc.writeSecPos {
 		// invalid location
@@ -492,14 +490,14 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 	// configure volume space size
 	iw.Primary.VolumeSpaceSize = int32(16 + uint32(len(vd)) + recursiveDirSectorCount(iw.root))
 
-	// processAll() will prepare the data to be written
+	// processAll() will prepare the data to be written, including offsets, etc.
 	if err = wc.processAll(); err != nil {
 		return fmt.Errorf("writing files: %s", err)
 	}
 
 	if len(iw.boot) > 0 {
 		// we have a boot catalog to make!
-		// First, grab the location of boot catalog
+		// First, grab the location of boot catalog and store in boot record
 		binary.LittleEndian.PutUint32(boot.BootSystemUse[:4], bootCatInfo.meta().targetSector)
 
 		// generate catalog
@@ -519,12 +517,11 @@ func (iw *ImageWriter) WriteTo(w io.Writer) error {
 		}
 	}
 
-	sector := uint32(16)
-	for _, pvd := range vd {
-		if err = wc.writeDescriptor(pvd, sector); err != nil {
+	// write volume descriptors
+	for i, pvd := range vd {
+		if err = wc.writeDescriptor(pvd, uint32(16+i)); err != nil {
 			return err
 		}
-		sector += 1
 	}
 
 	// this actually writes the data to the disk

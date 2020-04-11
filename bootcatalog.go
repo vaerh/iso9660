@@ -8,16 +8,16 @@ import (
 // ElTorito boot catalog
 // see: https://dev.lovelyhq.com/libburnia/libisofs/raw/master/doc/boot_sectors.txt
 
-type bootCatalogEntry struct {
-	platformId    byte // 0x00=PC 0xEF=UEFI
-	bootMedia     byte // 0=NoEmul, 2=1.44MB disk, 4=HDD
-	bootInfoTable bool
+type BootCatalogEntry struct {
+	Platform      ElToritoPlatform
+	BootMedia     ElToritoEmul // 0=NoEmul, 2=1.44MB disk, 4=HDD
+	BootInfoTable bool
 	file          Item
 }
 
 // encodeBootCatalogs must be called after prepareAll so that targetSector is
 // populated.
-func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
+func encodeBootCatalogs(e []*BootCatalogEntry) ([]byte, error) {
 	// transform a list of catalog entries into binary catalog
 	buf := &bytes.Buffer{}
 
@@ -26,7 +26,7 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 	for i, b := range e {
 		if i == 0 {
 			// Validation Entry
-			buf.Write([]byte{1, b.platformId, 0, 0}) // 4 bytes
+			buf.Write([]byte{1, byte(b.Platform), 0, 0}) // 4 bytes
 			// manuf_dev
 			buf.Write(make([]byte, 24)) // 24 bytes
 			// checksum
@@ -43,16 +43,16 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 			if i == cnt-1 {
 				headInd = 0x91
 			}
-			buf.Write([]byte{headInd, b.platformId, 1, 0})
+			buf.Write([]byte{headInd, byte(b.Platform), 1, 0})
 			buf.Write(make([]byte, 28))
 		}
 
 		// Initial/Default Entry or Section Entry
-		buf.Write([]byte{0x88, b.bootMedia, 0x00, 0x00}) // 4 bytes
-		buf.Write([]byte{0, 0})                          // 2 bytes: sys_type, unused
+		buf.Write([]byte{0x88, byte(b.BootMedia), 0x00, 0x00}) // 4 bytes
+		buf.Write([]byte{0, 0})                                // 2 bytes: sys_type, unused
 
 		// sec count depends if we are a uefi file or not (uefi needs file size)
-		if b.platformId == 0xef {
+		if b.Platform == 0xef {
 			// UEFI
 			siz := b.file.Size()
 			sizSec := uint16(siz / 512)
@@ -70,7 +70,7 @@ func encodeBootCatalogs(e []*bootCatalogEntry) ([]byte, error) {
 
 		buf.Write(make([]byte, 20)) // "Vendor unique selection criteria."
 
-		if b.bootInfoTable {
+		if b.BootInfoTable {
 			b.performInfoTable()
 		}
 	}
@@ -87,7 +87,7 @@ func doBootCatalogChecksum(b []byte) []byte {
 	return []byte{byte(v >> 8), byte(v & 0xff)}
 }
 
-func (b *bootCatalogEntry) performInfoTable() {
+func (b *BootCatalogEntry) performInfoTable() {
 	// alter file in b.file (a *bufferHndlr) to include boot info table insertion
 	// see: man mkisofs under EL TORITO BOOT INFORMATION TABLE
 	f := b.file.(*bufferHndlr)
