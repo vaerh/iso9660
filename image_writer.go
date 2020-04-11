@@ -87,6 +87,10 @@ func NewWriter() (*ImageWriter, error) {
 	}, nil
 }
 
+// AddBootEntry adds a El Torito boot entry to the image.
+// Typical usage (BootCatalogEntry defaults to X86 with no emulation)
+//
+// err = AddBootEntry(&BootCatalogEntry{BootInfoTable: true}, NewItemFile("syslinux/isolinux.bin"), "isolinux/isolinux.bin")
 func (iw *ImageWriter) AddBootEntry(boot *BootCatalogEntry, data Item, filePath string) error {
 	directoryPath, fileName := manglePath(filePath)
 
