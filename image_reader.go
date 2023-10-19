@@ -47,6 +47,15 @@ func (i *Image) readVolumes() error {
 	return nil
 }
 
+func (i *Image) Label() (string, error) {
+	for _, vd := range i.volumeDescriptors {
+		if vd.Type() == volumeTypePrimary {
+			return vd.Primary.VolumeIdentifier, nil
+		}
+	}
+	return "", fmt.Errorf("no primary volumes found")
+}
+
 // RootDir returns the File structure corresponding to the root directory
 // of the first primary volume
 func (i *Image) RootDir() (*File, error) {
